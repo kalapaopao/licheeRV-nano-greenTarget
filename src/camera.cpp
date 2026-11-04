@@ -230,8 +230,13 @@ int main(int argc,char** argv){
     if(SAMPLE_COMM_VI_IniToViCfg(&ini,&cfg)){close(server);return 3;}
     if(getenv("PREVIEW_DIAG_LINEAR"))cfg.astViInfo[0].stChnInfo.enCompressMode=COMPRESS_MODE_NONE;
     printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
-    SIZE_S size{1280,720};if(SAMPLE_PLAT_SYS_INIT(size)){close(server);return 4;}
-    if(SAMPLE_PLAT_VI_INIT(&cfg)){SAMPLE_COMM_SYS_Exit();close(server);return 5;}
+    printf("STEP sys_init begin\n");fflush(stdout);
+    SIZE_S size{1280,720};int sys_rc=SAMPLE_PLAT_SYS_INIT(size);
+    printf("STEP sys_init rc=%d\n",sys_rc);fflush(stdout);
+    if(sys_rc){close(server);return 4;}
+    int vi_rc=SAMPLE_PLAT_VI_INIT(&cfg);
+    printf("STEP vi_init rc=%d\n",vi_rc);fflush(stdout);
+    if(vi_rc){SAMPLE_COMM_SYS_Exit();close(server);return 5;}
     signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGPIPE,SIG_IGN);
     VI_CHN_ATTR_S vi{};int rc=CVI_VI_GetChnAttr(0,0,&vi);vi.u32Depth=2;if(!rc)rc=CVI_VI_SetChnAttr(0,0,&vi);
     VI_PIPE_ATTR_S pipe{};int prc=CVI_VI_GetPipeAttr(0,&pipe);

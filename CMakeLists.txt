@@ -38,7 +38,7 @@ add_library(common_settings INTERFACE)
 
 # 与原版一致的编译参数（-march 用 cv181x 的 xthead 变体以匹配 SDK）
 target_compile_options(common_settings INTERFACE
-    -D__CV181X__ -O3 -march=rv64imafdc -DSENSOR_GCORE_GC4653
+    -D__CV181X__ -O3 -march=rv64imafdcv0p7xthead -DSENSOR_GCORE_GC4653
     -D_MIDDLEWARE_V2_ -DC906 -DUSE_TPU_IVE -fsigned-char
     -Wno-format-truncation -fdiagnostics-color=always -s
 )
@@ -51,14 +51,14 @@ target_include_directories(common_settings INTERFACE
     ${SDK_ROOT}/kernel_include/linux
 )
 
-target_link_directories(common_settings INTERFACE ${SDK_ROOT}/lib)
+target_link_directories(common_settings INTERFACE ${SDK_ROOT}/lib ${SDK_ROOT}/lib/3rd ${SDK_ROOT}/lib_dyn)
 
-# 静态链接中间件（VI/VPSS 在 libvpu 里）
+# 静态链接自编中间件（VI/VPSS 在 libvpu.a 里）
 target_link_libraries(common_settings INTERFACE
     -Wl,--start-group
     -lsample -lvpu -lvenc -lisp -lisp_algo -lae -lawb -laf -lsys
-    -lcvi_bin_isp -lcvi_bin -ljson-c -lini -lmisc
-    -lsns_full -lsns_gc4653
+    -lcvi_bin_isp -lcvi_bin -lcvi_ive -ljson-c -lmisc -lvdec -lini
+    -lsns_gc4653 -lsns_lt6911 -lsns_os04a10 -lsns_sc035gs -lov_ov2685
     -Wl,--end-group
     -lpthread -latomic -lm
 )
