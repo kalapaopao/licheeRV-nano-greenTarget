@@ -218,8 +218,15 @@ int main(int argc,char** argv){
     printf("sensor_mode=%s preview=1280x720 quality=%u preview_limiter=none exposure_mode=%s\n",mode,quality,exposure_mode);
     printf("RECORD80_BLC_CONFIG mode=%s offsets=%u,%u,%u,%u\n",blc_mode,blc_r,blc_gr,blc_gb,blc_b);
     SAMPLE_INI_CFG_S ini{};SAMPLE_VI_CONFIG_S cfg{};
-    if(SAMPLE_COMM_VI_ParseIni(&ini)||ini.enSnsType[0]!=GCORE_GC4653_MIPI_4M_30FPS_10BIT){close(server);return 3;}
-    ini.enSnsType[0]=GCORE_GC4653_MIPI_720P_60FPS_10BIT;CVI_VI_SetDevNum(ini.devNum);
+    // 传感器模式由板端 /mnt/data/sensor_cfg.ini 决定，本工程要求 720P@60(10bit)。
+    // 说明：该模式的枚举常量来自板端镜像的 SDK，交叉编译所用的 SDK 没有同名符号，
+    // 所以这里不硬编码覆盖，只校验"不是 4M@30 模式"。
+    if(SAMPLE_COMM_VI_ParseIni(&ini)){close(server);return 3;}
+    if(ini.enSnsType[0]==GCORE_GC4653_MIPI_4M_30FPS_10BIT){
+        fprintf(stderr,"ERROR: sensor_cfg.ini 需为 GCORE_GC4653_MIPI_720P_60FPS_10BIT（当前是 4M_30FPS）\n");
+        close(server);return 3;
+    }
+    CVI_VI_SetDevNum(ini.devNum);
     if(SAMPLE_COMM_VI_IniToViCfg(&ini,&cfg)){close(server);return 3;}
     if(getenv("PREVIEW_DIAG_LINEAR"))cfg.astViInfo[0].stChnInfo.enCompressMode=COMPRESS_MODE_NONE;
     printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
