@@ -14,8 +14,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$REPO/build"
 
 # 默认工具链与 SDK 位置（与本机既有环境一致）
-: "${COMPILER:=/mnt/e/study/LicheeRV/dartvision_build/wsl_env/toolchain/host-tools/gcc/riscv64-linux-musl-x86_64/bin}"
-: "${CVI_SDK_ROOT:=/mnt/e/study/LicheeRV/dartvision_build/src_work/sdk}"
+: "${COMPILER:=/mnt/e/study/LicheeRV/env/toolchain/host-tools/gcc/riscv64-linux-musl-x86_64/bin}"
+: "${CVI_SDK_ROOT:=/mnt/e/study/LicheeRV/env/sipeed-sdk/middleware/v2}"
 export COMPILER CVI_SDK_ROOT
 
 echo "=== 环境 ==="
