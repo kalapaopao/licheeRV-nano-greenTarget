@@ -1,0 +1,29 @@
+# fly_LicheeRV / GC4653 adjustable camera settings
+# Flat YAML only: key: value; no nested sections, quotes, or lists.
+# Modify this file on the board, then restart sh start.sh to apply.
+
+# manual = fixed exposure + gain; auto = ISP auto exposure.
+exposure_mode: manual
+manual_exposure_us: 3000
+manual_analog_gain_x1024: 1024
+manual_digital_gain_x1024: 1024
+manual_isp_gain_x1024: 1024
+
+# Auto-mode limits: 0 means keep ISP default maximum.
+auto_exposure_max_us: 0
+auto_analog_gain_max_x1024: 0
+auto_digital_gain_max_x1024: 0
+auto_isp_gain_max_x1024: 0
+
+# Black level correction: manual or default (use ISP defaults).
+black_level_mode: manual
+black_level_r: 256
+black_level_gr: 256
+black_level_gb: 256
+black_level_b: 256
+
+# MJPEG JPEG quality, valid range: 75..90.
+jpeg_quality: 85
+
+# Default run length in seconds, valid range: 20..300.
+run_seconds: 120

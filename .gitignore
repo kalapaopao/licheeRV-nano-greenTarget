@@ -1,0 +1,20 @@
+# 板端编译产物（RISC-V 可执行文件不入库）
+camera
+build/
+*.o
+*.a
+
+# 录像与相机锁（运行期产生）
+recordings/
+*.avi
+.camera.lock/
+
+# 运行日志
+*.log
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
