@@ -534,9 +534,6 @@ CVI_S32 SAMPLE_COMM_SNS_GetSize(SAMPLE_SNS_TYPE_E enMode, PIC_SIZE_E *penSize)
 		break;
 #endif
 	case GCORE_GC4653_MIPI_720P_60FPS_10BIT:
-		/* 传感器 720P 模式输出 1920x1080 raw，但 VI 通道按 1280x720 配置：
-		 * VI 做裁切/下采样，输出像素量减半，才能达到 ~80fps 的硬件像素吞吐上限。
-		 * （PIC_1080P 时 VI 输出 1920x1080，实测最高只有 33.7fps） */
 		*penSize = PIC_720P;
 		break;
 	case GCORE_OV2685_MIPI_1600x1200_30FPS_10BIT:
@@ -569,9 +566,9 @@ CVI_S32 SAMPLE_COMM_SNS_GetPicSize(PIC_SIZE_E enPicSize, SIZE_S *pstSize)
 		pstSize->u32Height = 480;
 		break;
 
-	case PIC_720P:   /* 1280 * 720（本工程复用为 1080p timing，见下）*/
-		pstSize->u32Width  = 1920;
-		pstSize->u32Height = 1080;
+	case PIC_720P:   /* 1280 * 720 */
+		pstSize->u32Width  = 1280;
+		pstSize->u32Height = 720;
 		break;
 
 	case PIC_1600x1200:

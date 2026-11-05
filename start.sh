@@ -211,7 +211,6 @@ case "$WEB_BIND" in
     usb)  export WEB_IP_BIND=10.133.124.1; WEB_IP=10.133.124.1;;
     wifi) export WEB_IP_BIND=$(ifconfig wlan0 2>/dev/null | awk '/inet addr:/ {sub(/^addr:/, "", $2); print $2; exit}'); WEB_IP=$WEB_IP_BIND;;
 esac
-export PREVIEW_DIAG_LINEAR=1
 export DISPLAY_ENABLE="$DISPLAY_ENABLE"
 export DETECT_SAMPLE_STEPS="$DETECT_SAMPLE_STEPS"
 export DETECT_STRIDE="$DETECT_STRIDE"

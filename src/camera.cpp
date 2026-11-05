@@ -272,15 +272,10 @@ int main(int argc,char** argv){
     printf("SENSOR_MODE %s size=%ux%u detect=%s display=%s\n",
            mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height,
            g_detect_on?"on":"off", g_display_on?"on":"off");
-    // VB 池按 VI 实际输出尺寸分配：720P 模式下 VI 实际是 1920x1080
-    // （传感器该模式输出 1920x1080 raw）。按 1280x720 分配会 vi_sdk_enable_chn OOM。
-    { SIZE_S pool = mode_720p ? SIZE_S{1920,1080} : size;
-      printf("POOL_SIZE %ux%u\n", pool.u32Width, pool.u32Height);
-      int rc2=SAMPLE_PLAT_SYS_INIT(pool);
-      printf("STEP sys_init rc=%d\n",rc2);fflush(stdout);
-      if(rc2){close(server);return 4;} }
-    int sys_rc=0;
-    printf("STEP sys_init rc=%d\n",sys_rc);fflush(stdout);
+    /* VB pool follows the VI channel size: production 720P mode is 1280x720. */
+    int sys_rc = SAMPLE_PLAT_SYS_INIT(size);
+    printf("POOL_SIZE %ux%u sys_init_rc=%d\n", size.u32Width, size.u32Height, sys_rc);
+    fflush(stdout);
     if(sys_rc){close(server);return 4;}
     int vi_rc=SAMPLE_PLAT_VI_INIT(&cfg);
     printf("STEP vi_init rc=%d\n",vi_rc);fflush(stdout);

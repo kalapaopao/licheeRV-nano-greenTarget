@@ -83,24 +83,24 @@ static const GC4653_MODE_S g_astGc4653_mode[GC4653_MODE_NUM] = {
 		.name = "1280X720P30",
 		.astImg[0] = {
 			.stSnsSize = {
-				.u32Width = 1920,
-				.u32Height = 1080,
+				.u32Width = 1280,
+				.u32Height = 720,
 			},
 			.stWndRect = {
 				.s32X = 0,
 				.s32Y = 0,
-				.u32Width = 1920,
-				.u32Height = 1080,
+				.u32Width = 1280,
+				.u32Height = 720,
 			},
 			.stMaxSize = {
-				.u32Width = 1920,
-				.u32Height = 1080,
+				.u32Width = 1280,
+				.u32Height = 720,
 			},
 		},
 		.f32MaxFps = 60,
 		.f32MinFps = 2.75, /* 1500 * 30 / 16383  */
-		.u32HtsDef = 1250,
-		.u32VtsDef = 1200,//650
+		.u32HtsDef = 1500,
+		.u32VtsDef = 750,//650
 		.stExp[0] = {
 			.u16Min = 1,
 			.u16Max = 0x3fff,

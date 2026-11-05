@@ -90,7 +90,7 @@ static CVI_S32 cmos_get_wdr_size(VI_PIPE ViPipe, ISP_SNS_ISP_INFO_S *pstIspCfg);
 #define GC4653_FRAME_BUF_ADDR			0x031D
 
 #define GC4653_RES_IS_1440P(w, h)      ((w) <= 2560 && (h) <= 1440)
-#define GC4653_RES_IS_720P(w, h)      ((w) <= 1920 && (h) <= 1080)
+#define GC4653_RES_IS_720P(w, h)      ((w) <= 1280 && (h) <= 720)
 
 static CVI_S32 cmos_get_ae_default(VI_PIPE ViPipe, AE_SENSOR_DEFAULT_S *pstAeSnsDft)
 {
@@ -103,7 +103,7 @@ static CVI_S32 cmos_get_ae_default(VI_PIPE ViPipe, AE_SENSOR_DEFAULT_S *pstAeSns
 	pstAeSnsDft->u32FullLinesStd = pstSnsState->u32FLStd;
 	pstAeSnsDft->u32FlickerFreq = 50 * 256;
 	pstAeSnsDft->u32FullLinesMax = GC4653_FULL_LINES_MAX;
-	pstAeSnsDft->u32HmaxTimes = (1000000) / (pstSnsState->u32FLStd * g_astGc4653_mode[pstSnsState->u8ImgMode].f32MaxFps);
+	pstAeSnsDft->u32HmaxTimes = (1000000) / (pstSnsState->u32FLStd * 30);
 
 	pstAeSnsDft->stIntTimeAccu.enAccuType = AE_ACCURACY_LINEAR;
 	pstAeSnsDft->stIntTimeAccu.f32Accuracy = 1;
@@ -118,7 +118,7 @@ static CVI_S32 cmos_get_ae_default(VI_PIPE ViPipe, AE_SENSOR_DEFAULT_S *pstAeSns
 	pstAeSnsDft->u32MaxISPDgainTarget = 2 << pstAeSnsDft->u32ISPDgainShift;
 
 	if (g_au32LinesPer500ms[ViPipe] == 0)
-		pstAeSnsDft->u32LinesPer500ms = pstSnsState->u32FLStd * g_astGc4653_mode[pstSnsState->u8ImgMode].f32MaxFps / 2;
+		pstAeSnsDft->u32LinesPer500ms = pstSnsState->u32FLStd * 30 / 2;
 	else
 		pstAeSnsDft->u32LinesPer500ms = g_au32LinesPer500ms[ViPipe];
 #if 0
@@ -132,8 +132,8 @@ static CVI_S32 cmos_get_ae_default(VI_PIPE ViPipe, AE_SENSOR_DEFAULT_S *pstAeSns
 	switch (pstSnsState->enWDRMode) {
 	default:
 	case WDR_MODE_NONE:   /*linear mode*/
-		pstAeSnsDft->f32Fps = g_astGc4653_mode[pstSnsState->u8ImgMode].f32MaxFps;
-		pstAeSnsDft->f32MinFps = g_astGc4653_mode[pstSnsState->u8ImgMode].f32MinFps;
+		pstAeSnsDft->f32Fps = g_astGc4653_mode[GC4653_MODE_2560X1440P30].f32MaxFps;
+		pstAeSnsDft->f32MinFps = g_astGc4653_mode[GC4653_MODE_2560X1440P30].f32MinFps;
 		pstAeSnsDft->au8HistThresh[0] = 0xd;
 		pstAeSnsDft->au8HistThresh[1] = 0x28;
 		pstAeSnsDft->au8HistThresh[2] = 0x60;
@@ -155,10 +155,10 @@ static CVI_S32 cmos_get_ae_default(VI_PIPE ViPipe, AE_SENSOR_DEFAULT_S *pstAeSns
 		pstAeSnsDft->u32AEResponseFrame = 4;
 		pstAeSnsDft->enAeExpMode = AE_EXP_HIGHLIGHT_PRIOR;
 		pstAeSnsDft->u32InitExposure = g_au32InitExposure[ViPipe] ?
-			g_au32InitExposure[ViPipe] : g_astGc4653_mode[pstSnsState->u8ImgMode].stExp[0].u16Def;
+			g_au32InitExposure[ViPipe] : g_astGc4653_mode[GC4653_MODE_2560X1440P30].stExp[0].u16Def;
 
 		pstAeSnsDft->u32MaxIntTime = pstSnsState->u32FLStd - 8;
-		pstAeSnsDft->u32MinIntTime = g_astGc4653_mode[pstSnsState->u8ImgMode].stExp[0].u16Min;
+		pstAeSnsDft->u32MinIntTime = g_astGc4653_mode[GC4653_MODE_2560X1440P30].stExp[0].u16Min;
 		pstAeSnsDft->u32MaxIntTimeTarget = 65535;
 		pstAeSnsDft->u32MinIntTimeTarget = 1;
 		break;
@@ -682,7 +682,7 @@ static CVI_S32 cmos_set_image_mode(VI_PIPE ViPipe, ISP_CMOS_SENSOR_IMAGE_MODE_S 
 				      pstSnsState->enWDRMode);
 			return CVI_FAILURE;
 		}
-	} else if (pstSensorImageMode->f32Fps <= 180) {
+	} else if (pstSensorImageMode->f32Fps <= 60) {
 		if (pstSnsState->enWDRMode == WDR_MODE_NONE) {
 			if (GC4653_RES_IS_720P(pstSensorImageMode->u16Width, pstSensorImageMode->u16Height))
 				u8SensorImageMode = GC4653_MODE_1280X720P60;
@@ -778,23 +778,16 @@ static CVI_S32 sensor_rx_attr(VI_PIPE ViPipe, SNS_COMBO_DEV_ATTR_S *pstRxAttr)
 
 	memcpy(pstRxAttr, &gc4653_rx_attr, sizeof(*pstRxAttr));
 	if (pstSnsState->u8ImgMode == GC4653_MODE_1280X720P60) {
-		const char *clock_test = getenv("GC4653_TEST_MCLK");
-		if (clock_test && !strcmp(clock_test, "36")) {
-			/* Only when kernel module is verified to understand enum value 6. */
-			pstRxAttr->mclk.freq = CAMPLL_FREQ_36M;
-			printf("GC4653 request 36MHz enum=%d (unverified until actual clk readback)\n", CAMPLL_FREQ_36M);
-		} else {
 		char *value = getenv("MAIX_SENSOR_FPS");
 		if (value == NULL) {
 			pstRxAttr->mclk.freq = CAMPLL_FREQ_27M;
 		} else {
 			int fps = atoi(value);
 			if (fps >= 80) {
-				pstRxAttr->mclk.freq = CAMPLL_FREQ_27M;
+				pstRxAttr->mclk.freq = CAMPLL_FREQ_37P125M;
 			} else {
 				pstRxAttr->mclk.freq = CAMPLL_FREQ_27M;
 			}
-		}
 		}
 	} else if (pstSnsState->u8ImgMode == GC4653_MODE_2560X1440P30) {
 		pstRxAttr->mclk.freq = CAMPLL_FREQ_24M;

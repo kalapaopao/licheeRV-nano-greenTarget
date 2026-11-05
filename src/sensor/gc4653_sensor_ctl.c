@@ -1,6 +1,4 @@
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
@@ -24,8 +22,6 @@
 #define GC4653_CHIP_ID		0x4653
 
 static void gc4653_linear_1440p30_init(VI_PIPE ViPipe);
-static int saved_window[17];
-static int saved_valid;
 static void gc4653_linear_720p60_init(VI_PIPE ViPipe);
 
 CVI_U8 gc4653_i2c_addr = 0x29;
@@ -208,8 +204,6 @@ void gc4653_init(VI_PIPE ViPipe)
     CVI_U8            u8ImgMode;
 
 	gc4653_i2c_init(ViPipe);
-    saved_valid=1;
-    for(int i=0;i<17;i++){ saved_window[i]=gc4653_read_register(ViPipe,0x0344+i); if(saved_window[i]<0) saved_valid=0; }
 
 	u8ImgMode   = g_pastGc4653[ViPipe]->u8ImgMode;
 
@@ -224,9 +218,6 @@ void gc4653_init(VI_PIPE ViPipe)
 
 void gc4653_exit(VI_PIPE ViPipe)
 {
-    gc4653_standby(ViPipe);
-    if(saved_valid) for(int i=0;i<17;i++) gc4653_write_register(ViPipe,0x0344+i,saved_window[i]);
-    saved_valid=0;
 	gc4653_i2c_exit(ViPipe);
 }
 
@@ -386,19 +377,18 @@ static void gc4653_linear_1440p30_init(VI_PIPE ViPipe)
 
 static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
 {
-    // Exact published Ingenic GC4653 1080p60 register table; no inferred PLL values.
     gc4653_write_register(ViPipe, 0x03fe, 0xf0);
     gc4653_write_register(ViPipe, 0x03fe, 0x00);
     gc4653_write_register(ViPipe, 0x0317, 0x00);
     gc4653_write_register(ViPipe, 0x0320, 0x77);
-    gc4653_write_register(ViPipe, 0x0324, 0xd0);
+    gc4653_write_register(ViPipe, 0x0324, 0xc8);
     gc4653_write_register(ViPipe, 0x0325, 0x06);
-    gc4653_write_register(ViPipe, 0x0326, 0x87);
+    gc4653_write_register(ViPipe, 0x0326, 0x60);
     gc4653_write_register(ViPipe, 0x0327, 0x03);
     gc4653_write_register(ViPipe, 0x0334, 0x40);
-    gc4653_write_register(ViPipe, 0x0335, 0x51);
-    gc4653_write_register(ViPipe, 0x0336, 0x87);
+    gc4653_write_register(ViPipe, 0x0336, 0x60);
     gc4653_write_register(ViPipe, 0x0337, 0x82);
+    gc4653_write_register(ViPipe, 0x0335, 0x55);
     gc4653_write_register(ViPipe, 0x0315, 0x25);
     gc4653_write_register(ViPipe, 0x031c, 0xc6);
     gc4653_write_register(ViPipe, 0x0287, 0x18);
@@ -406,38 +396,19 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x0087, 0x50);
     gc4653_write_register(ViPipe, 0x029d, 0x08);
     gc4653_write_register(ViPipe, 0x0290, 0x00);
-    /* Experimental VTS override: frame length is the sensor-supported frame-rate control.
-     * For this 1080-line window, 1120 is the documented minimum (height + 32 + VB_min 8).
-     * Never reduce below 1120 in this test branch.
-     */
-    const char *vts_select = getenv("LICHEE_TEST_VTS");
-    unsigned vts = 1200;
-    if (vts_select && !strcmp(vts_select, "1180")) vts = 1180;
-    else if (vts_select && !strcmp(vts_select, "1160")) vts = 1160;
-    else if (vts_select && !strcmp(vts_select, "1140")) vts = 1140;
-    else if (vts_select && !strcmp(vts_select, "1120")) vts = 1120;
-    else if (vts_select && strcmp(vts_select, "1200")) {
-        printf("Unsupported LICHEE_TEST_VTS=%s; using 1200\n", vts_select);
-    }
-    printf("LICHEE_TEST_VTS=%u (factory reference 1200; minimum 1120 for 1080-line window)\n", vts);
-    gc4653_write_register(ViPipe, 0x0340, (vts >> 8) & 255);
-    gc4653_write_register(ViPipe, 0x0341, vts & 255);
-    gc4653_write_register(ViPipe, 0x0344, 0x02);
-    gc4653_write_register(ViPipe, 0x0345, 0x86);
-    gc4653_write_register(ViPipe, 0x0346, 0x00);
-    gc4653_write_register(ViPipe, 0x0347, 0xb6);
-    gc4653_write_register(ViPipe, 0x0348, 0x07);
-    gc4653_write_register(ViPipe, 0x0349, 0x90);
-    gc4653_write_register(ViPipe, 0x034a, 0x04);
-    gc4653_write_register(ViPipe, 0x034b, 0x48);
-    gc4653_write_register(ViPipe, 0x0351, 0x00);
+    gc4653_write_register(ViPipe, 0x0217, 0x40);
+    gc4653_write_register(ViPipe, 0x0234, 0x20);
+    gc4653_write_register(ViPipe, 0x0340, 0x05);
+    gc4653_write_register(ViPipe, 0x0341, 0xdd);
+    gc4653_write_register(ViPipe, 0x0341, 0xd0);
+    gc4653_write_register(ViPipe, 0x0345, 0x06);
+    gc4653_write_register(ViPipe, 0x034b, 0xb0);
+
+    gc4653_write_register(ViPipe, 0x034c, 0x05);
+    gc4653_write_register(ViPipe, 0x034e, 0x02);
+    gc4653_write_register(ViPipe, 0x034f, 0xd0);
     gc4653_write_register(ViPipe, 0x0352, 0x08);
-    gc4653_write_register(ViPipe, 0x0353, 0x00);
     gc4653_write_register(ViPipe, 0x0354, 0x08);
-    gc4653_write_register(ViPipe, 0x034c, 0x07);
-    gc4653_write_register(ViPipe, 0x034d, 0x80);
-    gc4653_write_register(ViPipe, 0x034e, 0x04);
-    gc4653_write_register(ViPipe, 0x034f, 0x38);
     gc4653_write_register(ViPipe, 0x02d1, 0xe0);
     gc4653_write_register(ViPipe, 0x0223, 0xf2);
     gc4653_write_register(ViPipe, 0x0238, 0xa4);
@@ -483,7 +454,6 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x022e, 0x00);
     gc4653_write_register(ViPipe, 0x027b, 0x3f);
     gc4653_write_register(ViPipe, 0x0269, 0x0f);
-    gc4653_write_register(ViPipe, 0x000f, 0x00);
     gc4653_write_register(ViPipe, 0x02d2, 0x40);
     gc4653_write_register(ViPipe, 0x027c, 0x08);
     gc4653_write_register(ViPipe, 0x023a, 0x2e);
@@ -498,7 +468,7 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x02a5, 0x02);
     gc4653_write_register(ViPipe, 0x0260, 0x0b);
     gc4653_write_register(ViPipe, 0x0216, 0x04);
-    gc4653_write_register(ViPipe, 0x0299, 0x1c);
+    gc4653_write_register(ViPipe, 0x0299, 0x1C);
     gc4653_write_register(ViPipe, 0x02bb, 0x0d);
     gc4653_write_register(ViPipe, 0x02a3, 0x02);
     gc4653_write_register(ViPipe, 0x02a4, 0x02);
@@ -516,42 +486,14 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x02b0, 0x68);
     gc4653_write_register(ViPipe, 0x0002, 0xa9);
     gc4653_write_register(ViPipe, 0x0004, 0x01);
-    gc4653_write_register(ViPipe, 0x0005, 0x8a);
-    gc4653_write_register(ViPipe, 0x0006, 0xe0);
-    gc4653_write_register(ViPipe, 0x0007, 0x65);
-    gc4653_write_register(ViPipe, 0x0008, 0x66);
-    gc4653_write_register(ViPipe, 0x0009, 0x56);
-    gc4653_write_register(ViPipe, 0x000a, 0x55);
     gc4653_write_register(ViPipe, 0x021a, 0x98);
     gc4653_write_register(ViPipe, 0x0266, 0xa0);
     gc4653_write_register(ViPipe, 0x0020, 0x01);
     gc4653_write_register(ViPipe, 0x0021, 0x03);
     gc4653_write_register(ViPipe, 0x0022, 0x00);
     gc4653_write_register(ViPipe, 0x0023, 0x04);
-    /* Experiment in test/ only: default 1250, bounded discrete steps.
-     * This controls sensor line timing; it is not a claim of valid 80 FPS.
-     * Do not permit unreviewed/unspecified HTS values.
-     */
-    const char *hts_select = getenv("LICHEE_TEST_HTS");
-    unsigned hts = 1250;
-    if (hts_select && !strcmp(hts_select, "1200")) hts = 1200;
-    else if (hts_select && !strcmp(hts_select, "1185")) hts = 1185;
-    else if (hts_select && !strcmp(hts_select, "1175")) hts = 1175;
-    else if (hts_select && !strcmp(hts_select, "1165")) hts = 1165;
-    else if (hts_select && !strcmp(hts_select, "1190")) hts = 1190;
-    else if (hts_select && !strcmp(hts_select, "1180")) hts = 1180;
-    else if (hts_select && !strcmp(hts_select, "1170")) hts = 1170;
-    else if (hts_select && !strcmp(hts_select, "1160")) hts = 1160;
-    else if (hts_select && !strcmp(hts_select, "1150")) hts = 1150;
-    else if (hts_select && !strcmp(hts_select, "1100")) hts = 1100;
-    else if (hts_select && !strcmp(hts_select, "1050")) hts = 1050;
-    else if (hts_select && !strcmp(hts_select, "1000")) hts = 1000;
-    else if (hts_select && strcmp(hts_select, "1250")) {
-        printf("Unsupported LICHEE_TEST_HTS=%s; using 1250\n", hts_select);
-    }
-    printf("LICHEE_TEST_HTS=%u (factory reference 1250)\n", hts);
-    gc4653_write_register(ViPipe, 0x0342, (hts >> 8) & 255);
-    gc4653_write_register(ViPipe, 0x0343, hts & 255);
+    gc4653_write_register(ViPipe, 0x0342, 0x06);
+    gc4653_write_register(ViPipe, 0x0343, 0x40);
     gc4653_write_register(ViPipe, 0x03fe, 0x10);
     gc4653_write_register(ViPipe, 0x03fe, 0x00);
     gc4653_write_register(ViPipe, 0x0106, 0x78);
@@ -565,6 +507,9 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x03fe, 0x10);
     gc4653_write_register(ViPipe, 0x03fe, 0x00);
     gc4653_write_register(ViPipe, 0x0100, 0x09);
+
+    gc4653_write_register(ViPipe, 0x000f, 0x00);
+    // otp
     gc4653_write_register(ViPipe, 0x0080, 0x02);
     gc4653_write_register(ViPipe, 0x0097, 0x0a);
     gc4653_write_register(ViPipe, 0x0098, 0x10);
@@ -582,7 +527,11 @@ static void gc4653_linear_720p60_init(VI_PIPE ViPipe)
     gc4653_write_register(ViPipe, 0x05be, 0x01);
     gc4653_write_register(ViPipe, 0x0317, 0x00);
     gc4653_write_register(ViPipe, 0x0a67, 0x00);
-    gc4653_default_reg_init(ViPipe);
-    delay_ms(10);
-    printf("FACTORY 1920x1080 60fps table initialized\n");
+
+    gc4653_write_register(ViPipe, 0x0000, 0x00);  // end flag
+
+	gc4653_default_reg_init(ViPipe);
+	delay_ms(10);
+
+	printf("ViPipe:%d,===GC4653 720P 60fps 10bit LINEAR Init OK!===\n", ViPipe);
 }
