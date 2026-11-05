@@ -1,6 +1,7 @@
 # 板端编译产物（RISC-V 可执行文件不入库）
 camera
 build/
+build_host/
 *.o
 *.a
 
@@ -12,12 +13,12 @@ recordings/
 # 运行日志
 *.log
 
+# 回归测试的原始帧数据（体积大，按需从录像重新导出）
+tests/*.i420
+
 # 编辑器/系统
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
 .DS_Store
-
-# ����������
-build/bin/

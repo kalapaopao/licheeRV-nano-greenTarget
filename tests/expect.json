@@ -1,0 +1,47 @@
+[
+ {
+  "file": "gc4653_20261031_093856_740_3600.i420",
+  "w": 1280,
+  "h": 720,
+  "python_status": "detected",
+  "python_cx": 621.2,
+  "python_cy": 249.2,
+  "python_radius": 17.57
+ },
+ {
+  "file": "gc4653_20261031_093856_740_5400.i420",
+  "w": 1280,
+  "h": 720,
+  "python_status": "detected",
+  "python_cx": 428.8,
+  "python_cy": 317.7,
+  "python_radius": 11.56
+ },
+ {
+  "file": "gc4653_20261031_094039_1242_1094.i420",
+  "w": 1280,
+  "h": 720,
+  "python_status": "detected",
+  "python_cx": 694.5,
+  "python_cy": 340.7,
+  "python_radius": 15.15
+ },
+ {
+  "file": "gc4653_20261031_094039_1242_1641.i420",
+  "w": 1280,
+  "h": 720,
+  "python_status": "detected",
+  "python_cx": 664.0,
+  "python_cy": 524.0,
+  "python_radius": 10.54
+ },
+ {
+  "file": "gc4653_20261031_093856_740_500.i420",
+  "w": 1280,
+  "h": 720,
+  "python_status": "lost",
+  "python_cx": 0.0,
+  "python_cy": 0.0,
+  "python_radius": null
+ }
+]

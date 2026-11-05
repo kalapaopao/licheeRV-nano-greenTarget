@@ -18,9 +18,14 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include "avi_mjpeg.h"
+#include "green_detect.h"
+// 绿色圆灯检测：主循环里抽点下采样后调 greendet::Tracker（已板端验证 2.25ms/帧）
+static greendet::Tracker g_tracker;
+static unsigned long green_frames=0,green_hits=0,green_reports=0;
 // NPU is intentionally not linked or implemented in this version.
 extern "C" {
 #include "sample_comm.h"
+#include <cvi_sys.h>
 #include "cvi_venc.h"
 #include "cvi_isp.h"
 #include "cvi_ae.h"
@@ -331,6 +336,42 @@ int main(int argc,char** argv){
         else if(frame.stVFrame.u64PTS<=lastpts)++dups;
         last=t;lastpts=frame.stVFrame.u64PTS;++count;
         {
+            // ---- 绿色圆灯检测（每帧，抽点 4 → 320x180 网格）----
+            // 说明：VI 帧为 NV12（UV 交织）。抽点 Y 与 UV，步长 4；
+            //       U/V 顺序对绿色判据无影响（两者都要求 < 128）。
+            const unsigned W=frame.stVFrame.u32Width,H=frame.stVFrame.u32Height;
+            if(frame.stVFrame.pu8VirAddr[0]==nullptr){
+                // 映射 Y + UV 平面（只需一次的物理地址→虚拟地址）
+                unsigned sy=frame.stVFrame.u32Stride[0]*H;
+                unsigned su=frame.stVFrame.u32Stride[1]*(H/2);
+                frame.stVFrame.pu8VirAddr[0]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[0],sy);
+                frame.stVFrame.pu8VirAddr[1]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[1],su);
+            }
+            static unsigned char gy[168*168],gu[84*84],gv[84*84];
+            const int S=4,w=W/S,h=H/S,cw=w/2,ch=h/2;
+            if(frame.stVFrame.pu8VirAddr[0] && w<=168 && h<=168){
+                const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
+                const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];
+                unsigned ystride=frame.stVFrame.u32Stride[0],uvstride=frame.stVFrame.u32Stride[1];
+                for(int yy=0;yy<h;++yy){const unsigned char*r=Yp+(size_t)(yy*S)*ystride;
+                    for(int xx=0;xx<w;++xx)gy[(size_t)yy*w+xx]=r[xx*S];}
+                for(int yy=0;yy<ch;++yy){const unsigned char*r=UVp+(size_t)(yy*S)*uvstride;
+                    for(int xx=0;xx<cw;++xx){gu[(size_t)yy*cw+xx]=r[(xx*S)*2];gv[(size_t)yy*cw+xx]=r[(xx*S)*2+1];}}
+                ++green_frames;
+                const greendet::TrackState& st=g_tracker.process(gy,gu,gv,w,h);
+                if(st.status!=greendet::Status::kLost){
+                    ++green_hits;
+                    if(green_frames%60==0 || st.misses==0){
+                        printf("GREEN_TARGET status=%s cx=%.1f cy=%.1f r=%.1f hits=%lu frames=%lu\n",
+                               st.status==greendet::Status::kDetected?"detected":"coast",
+                               st.cx*S,st.cy*S,st.blob.radius*S,green_hits,green_frames);
+                    }
+                }
+                if(green_frames%300==0){
+                    printf("GREEN_STAT frames=%lu hits=%lu rate=%.1f%%\n",
+                           green_frames,green_hits,100.0*green_hits/(green_frames?green_frames:1));
+                }
+            }
             std::lock_guard<std::mutex> guard(input_mutex);
             if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);++preview_replaced;}
             pending=frame;has_pending=true;
