@@ -26,6 +26,7 @@ static double det_total_ms=0.0; static unsigned long det_count=0;
 static double samp_total_ms=0.0, track_total_ms=0.0;
 static int g_detect_stride=1; static unsigned long g_frame_idx=0;
 static int g_sample_steps=2;   // 每块 n×n 采样点数（1..4）
+static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
 static bool g_draw_test_box=false;
 // NPU is intentionally not linked or implemented in this version.
 extern "C" {
@@ -210,6 +211,7 @@ int main(int argc,char** argv){
     if(disp && !strcmp(disp,"false"))g_display_on=false;
     if(getenv("DETECT_STRIDE")){int v=atoi(getenv("DETECT_STRIDE"));if(v>=1&&v<=10)g_detect_stride=v;}
     if(getenv("DETECT_SAMPLE_STEPS")){int v=atoi(getenv("DETECT_SAMPLE_STEPS"));if(v>=1&&v<=4)g_sample_steps=v;}
+    if(getenv("DETECT_ENABLE") && !strcmp(getenv("DETECT_ENABLE"),"false"))g_detect_on=false;
     if(getenv("DRAW_TEST_BOX") && !strcmp(getenv("DRAW_TEST_BOX"),"1"))g_draw_test_box=true;
     const char* exposure_mode=getenv("RECORD80_EXPOSURE_MODE");
     if(!exposure_mode)exposure_mode="manual";
@@ -267,7 +269,9 @@ int main(int argc,char** argv){
     printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
     printf("STEP sys_init begin\n");fflush(stdout);
     SIZE_S size = mode_720p ? SIZE_S{1280,720} : SIZE_S{2560,1440};
-    printf("SENSOR_MODE %s size=%ux%u\n", mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height);
+    printf("SENSOR_MODE %s size=%ux%u detect=%s display=%s\n",
+           mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height,
+           g_detect_on?"on":"off", g_display_on?"on":"off");
     // VB 池按 VI 实际输出尺寸分配：720P 模式下 VI 实际是 1920x1080
     // （传感器该模式输出 1920x1080 raw）。按 1280x720 分配会 vi_sdk_enable_chn OOM。
     { SIZE_S pool = mode_720p ? SIZE_S{1920,1080} : size;
@@ -396,7 +400,7 @@ int main(int argc,char** argv){
             }
             static unsigned char gy[320*180],gu[160*90],gv[160*90];
             const int S=(W>=2000)?8:4,w=W/S,h=H/S,cw=w/2,ch=h/2;
-            const bool do_detect = ((g_frame_idx++ % (unsigned)g_detect_stride)==0);
+            const bool do_detect = g_detect_on && ((g_frame_idx++ % (unsigned)g_detect_stride)==0);
             if(do_detect && frame.stVFrame.pu8VirAddr[0] && w<=320 && h<=180){
                 const double td0=now();
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];

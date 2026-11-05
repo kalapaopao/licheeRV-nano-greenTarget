@@ -41,6 +41,7 @@ WEB_BIND=auto
 DISPLAY_ENABLE=true
 DETECT_SAMPLE_STEPS=2
 DETECT_STRIDE=1
+DETECT_ENABLE=true
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -77,6 +78,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         display_enable) DISPLAY_ENABLE=$value;;
         detect_sample_steps) DETECT_SAMPLE_STEPS=$value;;
         detect_stride) DETECT_STRIDE=$value;;
+        detect_enable) DETECT_ENABLE=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
@@ -87,6 +89,7 @@ case "$WEB_BIND" in auto|usb|wifi) ;; *) config_error 'web_ip must be auto, usb 
 case "$DISPLAY_ENABLE" in true|false) ;; *) config_error 'display_enable must be true or false';; esac
 validate_integer detect_sample_steps "$DETECT_SAMPLE_STEPS" 1 4
 validate_integer detect_stride "$DETECT_STRIDE" 1 10
+case "$DETECT_ENABLE" in true|false) ;; *) config_error 'detect_enable must be true or false';; esac
 case "$BLC_MODE" in manual|default) ;; *) config_error 'black_level_mode must be manual or default';; esac
 validate_integer manual_exposure_us "$MANUAL_EXP_US" 100 10000
 validate_integer manual_analog_gain_x1024 "$MANUAL_AGAIN" 1024 16384
@@ -212,6 +215,7 @@ export PREVIEW_DIAG_LINEAR=1
 export DISPLAY_ENABLE="$DISPLAY_ENABLE"
 export DETECT_SAMPLE_STEPS="$DETECT_SAMPLE_STEPS"
 export DETECT_STRIDE="$DETECT_STRIDE"
+export DETECT_ENABLE="$DETECT_ENABLE"
 if [ "$RECORDING" -eq 1 ]; then
     RECORD_DIR="$ROOT/recordings"
     mkdir -p "$RECORD_DIR"

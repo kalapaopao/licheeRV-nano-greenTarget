@@ -45,3 +45,7 @@ display_enable: true
 detect_sample_steps: 2
 # Run detection every Nth captured frame (1 = every frame).
 detect_stride: 1
+
+# Detection switch: false = skip the green-target detector entirely
+# (pure capture, useful for measuring the detector's cost).
+detect_enable: true
