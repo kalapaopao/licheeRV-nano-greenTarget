@@ -22,6 +22,11 @@
 // 绿色圆灯检测：主循环里抽点下采样后调 greendet::Tracker（已板端验证 2.25ms/帧）
 static greendet::Tracker g_tracker;
 static unsigned long green_frames=0,green_hits=0,green_reports=0;
+static double det_total_ms=0.0; static unsigned long det_count=0;
+static double samp_total_ms=0.0, track_total_ms=0.0;
+static int g_detect_stride=1; static unsigned long g_frame_idx=0;
+static int g_sample_steps=2;   // 每块 n×n 采样点数（1..4）
+static bool g_draw_test_box=false;
 // NPU is intentionally not linked or implemented in this version.
 extern "C" {
 #include "sample_comm.h"
@@ -29,6 +34,20 @@ extern "C" {
 #include "cvi_venc.h"
 #include "cvi_isp.h"
 #include "cvi_ae.h"
+}
+
+// VI 的帧缓冲来自固定 VB 池，物理地址会反复出现；
+// 每帧都 Mmap 会造成巨大开销（实测 231ms/帧），这里缓存映射结果。
+struct VaCache { CVI_U64 phy; unsigned len; unsigned char* va; };
+static VaCache g_va[16]; static int g_va_n=0; static unsigned long g_map_miss=0;
+// 必须用缓存映射：未缓存的 CMA 每次字节访问都走总线，实测 223ms/帧。
+static unsigned char* map_cached(CVI_U64 phy, unsigned len){
+    for(int i=0;i<g_va_n;++i)
+        if(g_va[i].phy==phy && g_va[i].len==len) return g_va[i].va;
+    unsigned char* v=(unsigned char*)CVI_SYS_MmapCache(phy,len);
+    if(v && g_va_n<16){ g_va[g_va_n].phy=phy; g_va[g_va_n].len=len; g_va[g_va_n].va=v; ++g_va_n; }
+    ++g_map_miss;
+    return v;
 }
 static bool env_u32(const char* name,unsigned fallback,unsigned low,unsigned high,unsigned& out){
     const char* s=getenv(name);if(!s){out=fallback;return true;}
@@ -48,6 +67,8 @@ static bool has_pending=false;
 static std::atomic<unsigned long> encoded(0),errors(0);
 static std::atomic<unsigned long> network_sent(0),network_bytes(0),preview_replaced(0);
 static bool recording_enabled=false;
+// display_enable: false 时不启动编码线程与 HTTP 服务（实战模式，省电降温）
+static bool g_display_on=true;
 static std::string recording_dir;
 static std::atomic<int> recording_failed(0);
 static AviMjpegWriter avi;
@@ -185,6 +206,11 @@ int main(int argc,char** argv){
     if(recording_enabled)recording_dir=argv[2];
     const char* mode="80";
     if(argc>=4 && strcmp(argv[3],"80"))return 2;
+    const char* disp=getenv("DISPLAY_ENABLE");
+    if(disp && !strcmp(disp,"false"))g_display_on=false;
+    if(getenv("DETECT_STRIDE")){int v=atoi(getenv("DETECT_STRIDE"));if(v>=1&&v<=10)g_detect_stride=v;}
+    if(getenv("DETECT_SAMPLE_STEPS")){int v=atoi(getenv("DETECT_SAMPLE_STEPS"));if(v>=1&&v<=4)g_sample_steps=v;}
+    if(getenv("DRAW_TEST_BOX") && !strcmp(getenv("DRAW_TEST_BOX"),"1"))g_draw_test_box=true;
     const char* exposure_mode=getenv("RECORD80_EXPOSURE_MODE");
     if(!exposure_mode)exposure_mode="manual";
     if(strcmp(exposure_mode,"auto") && strcmp(exposure_mode,"manual")){fprintf(stderr,"Invalid exposure mode\n");return 2;}
@@ -265,13 +291,22 @@ int main(int argc,char** argv){
     attr.stVencAttr.stAttrJpege.enReceiveMode=VENC_PIC_RECEIVE_SINGLE;
     attr.stGopAttr.enGopMode=VENC_GOPMODE_NORMALP;
     bool created=false;
-    if(!rc){rc=CVI_VENC_CreateChn(0,&attr);created=rc==0;printf("VENC CreateChn rc=0x%x\n",rc);}
-    if(!rc){VENC_JPEG_PARAM_S jpeg{};rc=CVI_VENC_GetJpegParam(0,&jpeg);if(!rc){jpeg.u32Qfactor=quality;rc=CVI_VENC_SetJpegParam(0,&jpeg);}printf("VENC JPEG quality=%u rc=0x%x\n",quality,rc);}
-    if(rc)running=0;
-    std::thread server_thread(http_server,server);
-    std::thread encoder_thread(encoder_worker);
-    printf("CAMERA_READY preview=http://%s:8081/ inference=off recorder=%s\n",
-           argv[1],recording_enabled?"on":"off");
+    if(g_display_on){
+        if(!rc){rc=CVI_VENC_CreateChn(0,&attr);created=rc==0;printf("VENC CreateChn rc=0x%x\n",rc);}
+        if(!rc){VENC_JPEG_PARAM_S jpeg{};rc=CVI_VENC_GetJpegParam(0,&jpeg);if(!rc){jpeg.u32Qfactor=quality;rc=CVI_VENC_SetJpegParam(0,&jpeg);}printf("VENC JPEG quality=%u rc=0x%x\n",quality,rc);}
+        if(rc)running=0;
+    }else{
+        printf("VENC skipped (display_enable=false)\n");
+    }
+    std::thread server_thread;
+    std::thread encoder_thread;
+    if(g_display_on){
+        server_thread=std::thread(http_server,server);
+        encoder_thread=std::thread(encoder_worker);
+    }
+    printf("CAMERA_READY display=%s preview=%s recorder=%s\n",
+           g_display_on?"on":"off", g_display_on?argv[1]:"none",
+           recording_enabled?"on":"off");
     unsigned long count=0,dups=0,timeouts=0;uint64_t firstpts=0,lastpts=0;
     double start=now(),first=0,last=0,report=start;
     bool diag_applied=false;
@@ -349,35 +384,85 @@ int main(int argc,char** argv){
             //       U/V 顺序对绿色判据无影响（两者都要求 < 128）。
             const unsigned W=frame.stVFrame.u32Width,H=frame.stVFrame.u32Height;
             if(frame.stVFrame.pu8VirAddr[0]==nullptr){
-                // 映射 Y + UV 平面（只需一次的物理地址→虚拟地址）
-                unsigned sy=frame.stVFrame.u32Stride[0]*H;
-                unsigned su=frame.stVFrame.u32Stride[1]*((H+1)/2);   /* 半平面行数，含奇数行余量 */
-                frame.stVFrame.pu8VirAddr[0]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[0],sy);
-                frame.stVFrame.pu8VirAddr[1]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[1],su);
+                unsigned sy=frame.stVFrame.u32Length[0]?frame.stVFrame.u32Length[0]:frame.stVFrame.u32Stride[0]*H;
+                unsigned su=frame.stVFrame.u32Length[1]?frame.stVFrame.u32Length[1]:frame.stVFrame.u32Stride[1]*((H+1)/2);
+                frame.stVFrame.pu8VirAddr[0]=map_cached(frame.stVFrame.u64PhyAddr[0],sy);
+                frame.stVFrame.pu8VirAddr[1]=map_cached(frame.stVFrame.u64PhyAddr[1],su);
             }
             static unsigned char gy[320*180],gu[160*90],gv[160*90];
             const int S=(W>=2000)?8:4,w=W/S,h=H/S,cw=w/2,ch=h/2;
-            if(frame.stVFrame.pu8VirAddr[0] && w<=320 && h<=180){
+            const bool do_detect = ((g_frame_idx++ % (unsigned)g_detect_stride)==0);
+            if(do_detect && frame.stVFrame.pu8VirAddr[0] && w<=320 && h<=180){
+                const double td0=now();
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
                 const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];
                 unsigned ystride=frame.stVFrame.u32Stride[0],uvstride=frame.stVFrame.u32Stride[1];
                 const unsigned y_rows=frame.stVFrame.u32Length[0]/ystride; /* Y 有效行数 */
                 const unsigned uv_rows=frame.stVFrame.u32Length[1]/frame.stVFrame.u32Stride[1];
+                /* 块内 n×n 子采样取最大值：发光目标是亮斑，纯抽样会漏掉。
+                   n 由 DETECT_SAMPLE_STEPS 控制：1=1.7ms 2=7ms 4=28ms。 */
+                const int ns=g_sample_steps;
+                const int sstep=(ns>1)?(S/ns):S;
                 for(int yy=0;yy<h;++yy){
-                    const unsigned r0=(yy*S < y_rows-1) ? yy*S : (y_rows-1);
-                    const unsigned r1=(yy*S+1 < y_rows) ? (yy*S+1) : r0;
-                    const unsigned char*a=Yp+(size_t)r0*ystride;
-                    const unsigned char*b=Yp+(size_t)r1*ystride;
+                    const int by=yy*S;
                     for(int xx=0;xx<w;++xx){
-                        const unsigned c0=xx*S, c1=(xx*S+1<W)?(xx*S+1):(xx*S);
-                        unsigned m=a[c0]; if(a[c1]>m)m=a[c1]; if(b[c0]>m)m=b[c0]; if(b[c1]>m)m=b[c1];
+                        const int bx=xx*S;
+                        unsigned m=0;
+                        for(int sy=0;sy<ns;++sy){
+                            const unsigned ry=(unsigned)(by+sy*sstep);
+                            if(ry>=y_rows)break;
+                            const unsigned char*row=Yp+(size_t)ry*ystride;
+                            for(int sx=0;sx<ns;++sx){
+                                const unsigned cx=(unsigned)(bx+sx*sstep);
+                                if(cx>=W)break;
+                                const unsigned v=row[cx];
+                                if(v>m)m=v;
+                            }
+                        }
                         gy[(size_t)yy*w+xx]=(unsigned char)m;}}
                 for(int yy=0;yy<ch;++yy){
                     const unsigned ur=(yy*S < uv_rows) ? yy*S : (uv_rows?uv_rows-1:0);
                     const unsigned char*r=UVp+(size_t)ur*uvstride;
                     for(int xx=0;xx<cw;++xx){gu[(size_t)yy*cw+xx]=r[(xx*S)*2];gv[(size_t)yy*cw+xx]=r[(xx*S)*2+1];}}
+                samp_total_ms+=(now()-td0)*1000.0;
+                const double td1=now();
                 ++green_frames;
                 const greendet::TrackState& st=g_tracker.process(gy,gu,gv,w,h);
+                track_total_ms+=(now()-td1)*1000.0;
+                // ---- 把跟踪框叠加到 Y 平面（编码前，网页与录像都能看到）----
+                // 纯亮度写入，不涉及色彩转换；框宽 3px，最小半径 12px 保证远处可见。
+                if(g_display_on && st.status!=greendet::Status::kLost){
+                    int cxp=(int)(st.cx*S), cyp=(int)(st.cy*S);
+                    int rp=(int)(st.blob.radius*S)+6; if(rp<12)rp=12;
+                    int x0=cxp-rp, x1=cxp+rp, y0=cyp-rp, y1=cyp+rp;
+                    if(x0<0)x0=0; if(y0<0)y0=0;
+                    if(x1>(int)W-2)x1=(int)W-2; if(y1>(int)H-2)y1=(int)H-2;
+                    unsigned char*Yw=(unsigned char*)Yp;
+                    for(int t=0;t<3;++t){
+                        int ya=y0+t, yb=y1-t, xa=x0+t, xb=x1-t;
+                        if(ya>=0&&ya<(int)H)for(int x=x0;x<=x1;++x)Yw[(size_t)ya*ystride+x]=255;
+                        if(yb>=0&&yb<(int)H)for(int x=x0;x<=x1;++x)Yw[(size_t)yb*ystride+x]=255;
+                        if(xa>=0&&xa<(int)W)for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xa]=255;
+                        if(xb>=0&&xb<(int)W)for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xb]=255;
+                    }
+                    // 缓存映射下必须把脏行写回 DRAM，硬件 JPEG 才能看到框
+                    CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw, frame.stVFrame.u32Stride[0]*H);
+                }
+                // 调试：固定位置画框，用于验证画框+缓存刷新链路（无需真实目标）
+                if(g_draw_test_box && frame.stVFrame.pu8VirAddr[0]){
+                    unsigned char*Yw=(unsigned char*)Yp;
+                    int bx0=(int)(W/4), bx1=(int)(W/4+W/4), by0=(int)(H/4), by1=(int)(H/4+H/4);
+                    for(int t=0;t<4;++t){
+                        int ya=by0+t, yb=by1-t, xa=bx0+t, xb=bx1-t;
+                        for(int x=bx0;x<=bx1;++x){
+                            if(ya<(int)H)Yw[(size_t)ya*ystride+x]=255;
+                            if(yb>=0)Yw[(size_t)yb*ystride+x]=255;}
+                        for(int y=by0;y<=by1;++y){
+                            if(xa<(int)W)Yw[(size_t)y*ystride+xa]=255;
+                            if(xb>=0)Yw[(size_t)y*ystride+xb]=255;}
+                    }
+                    CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw, frame.stVFrame.u32Stride[0]*H);
+                }
                 if(st.status!=greendet::Status::kLost){
                     ++green_hits;
                     if(green_frames%60==0 || st.misses==0){
@@ -386,25 +471,31 @@ int main(int argc,char** argv){
                                st.cx*S,st.cy*S,st.blob.radius*S,green_hits,green_frames);
                     }
                 }
+                det_total_ms+=(now()-td0)*1000.0; ++det_count;
                 if(green_frames%300==0){
                     printf("GREEN_STAT frames=%lu hits=%lu rate=%.1f%%\n",
                            green_frames,green_hits,100.0*green_hits/(green_frames?green_frames:1));
                 }
             }
-            std::lock_guard<std::mutex> guard(input_mutex);
-            if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);++preview_replaced;}
-            pending=frame;has_pending=true;
+            if(g_display_on){
+                std::lock_guard<std::mutex> guard(input_mutex);
+                if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);++preview_replaced;}
+                pending=frame;has_pending=true;
+            }else{
+                CVI_VI_ReleaseChnFrame(0,0,&frame);   // 无消费者，直接归还
+            }
         }
         if(t-report>=5 && count>1){
             unsigned long enc=encoded.load(),sent=network_sent.load(),bytes=network_bytes.load();
             printf("capture_frames=%lu host_fps=%.4f pts_fps=%.4f duplicate_pts=%lu timeouts=%lu encoded=%lu encode_errors=%lu encode_fps=%.3f sent_fps=%.3f jpeg_mbit_s=%.3f preview_replaced=%lu\n",count,(count-1)/(last-first),lastpts>firstpts?(count-1)*1e6/(lastpts-firstpts):0,dups,timeouts,enc,errors.load(),(enc-last_encoded)/(t-report),(sent-last_sent)/(t-report),(bytes-last_bytes)*8e-6/(t-report),preview_replaced.load());
+            if(det_count){printf("DETECT avg_ms=%.3f calls=%lu stride=%d map_miss=%lu sample_ms=%.3f track_ms=%.3f ns=%d\n",det_total_ms/det_count,det_count,g_detect_stride,g_map_miss,samp_total_ms/det_count,track_total_ms/det_count,g_sample_steps);det_total_ms=0;det_count=0;samp_total_ms=0;track_total_ms=0;}
             double wfps=(count-last_frame_count)/(t-report);double wpts=(last_window_pts&&lastpts>last_window_pts)?(count-last_frame_count)*1000000.0/(lastpts-last_window_pts):0;printf("CLOCK36_WINDOW elapsed_s=%.2f frames=%lu host_fps=%.4f pts_fps=%.4f\n",t-start,count-last_frame_count,wfps,wpts);last_frame_count=count;last_window_pts=lastpts;last_encoded=enc;last_sent=sent;last_bytes=bytes;report=t;
         }
     }
-    encoder_thread.join();
+    if(encoder_thread.joinable())encoder_thread.join();
     if(recording_enabled && !avi.finish())recording_failed=1;
     {std::lock_guard<std::mutex> guard(input_mutex);if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);has_pending=false;}}
-    server_thread.join();
+    if(server_thread.joinable())server_thread.join();
     if(created){CVI_VENC_StopRecvFrame(0);CVI_VENC_DestroyChn(0);}
     SAMPLE_COMM_VI_DestroyIsp(&cfg);SAMPLE_COMM_VI_DestroyVi(&cfg);SAMPLE_COMM_SYS_Exit();
     printf("stopped frames=%lu encoded=%lu errors=%lu tuning_failed=%d recording_failed=%d\n",

@@ -35,3 +35,13 @@ record_enable: false
 # Web preview bind: auto = all interfaces (USB 10.133.124.1 AND Wi-Fi both work);
 # usb = USB NIC only; wifi = Wi-Fi NIC only.
 web_ip: auto
+
+# Display switch: true = start JPEG encoder + HTTP preview (draws detection box);
+# false = no encoder, no web server (combat mode: saves CPU and heat).
+display_enable: true
+
+# Detection sampling density inside each stride block: 1=fastest(3.7ms)
+# 2=balanced(9.4ms, default) 4=best small-target(27ms, halves fps).
+detect_sample_steps: 2
+# Run detection every Nth captured frame (1 = every frame).
+detect_stride: 1
