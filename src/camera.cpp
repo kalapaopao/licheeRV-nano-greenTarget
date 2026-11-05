@@ -218,7 +218,11 @@ int main(int argc,char** argv){
     int server=socket(AF_INET,SOCK_STREAM,0);if(server<0)return 2;
     int reuse=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
     sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(8081);
-    if(inet_pton(AF_INET,argv[1],&address.sin_addr)!=1 || bind(server,reinterpret_cast<sockaddr*>(&address),sizeof(address)) || listen(server,4)){perror("HTTP bind");close(server);return 2;}
+    const char*web_ip=getenv("WEB_IP_BIND")?getenv("WEB_IP_BIND"):argv[1];
+    if(!strcmp(web_ip,"auto"))address.sin_addr.s_addr=INADDR_ANY;
+    else if(inet_pton(AF_INET,web_ip,&address.sin_addr)!=1){perror("HTTP parse");close(server);return 2;}
+    if(bind(server,reinterpret_cast<sockaddr*>(&address),sizeof(address)) || listen(server,4)){perror("HTTP bind");close(server);return 2;}
+    printf("WEB_BIND ip=%s\n",web_ip);
     setenv("MAIX_SENSOR_FPS",mode,1);
     printf("sensor_mode=%s preview=1280x720 quality=%u preview_limiter=none exposure_mode=%s\n",mode,quality,exposure_mode);
     printf("RECORD80_BLC_CONFIG mode=%s offsets=%u,%u,%u,%u\n",blc_mode,blc_r,blc_gr,blc_gb,blc_b);
@@ -227,8 +231,10 @@ int main(int argc,char** argv){
     // 说明：该模式的枚举常量来自板端镜像的 SDK，交叉编译所用的 SDK 没有同名符号，
     // 所以这里不硬编码覆盖，只校验"不是 4M@30 模式"。
     if(SAMPLE_COMM_VI_ParseIni(&ini)){close(server);return 3;}
-    if(ini.enSnsType[0]==GCORE_GC4653_MIPI_4M_30FPS_10BIT){
-        fprintf(stderr,"ERROR: sensor_cfg.ini 需为 GCORE_GC4653_MIPI_720P_60FPS_10BIT（当前是 4M_30FPS）\n");
+    bool mode_4m30 = (ini.enSnsType[0]==GCORE_GC4653_MIPI_4M_30FPS_10BIT);
+    bool mode_720p = (ini.enSnsType[0]==GCORE_GC4653_MIPI_720P_60FPS_10BIT);
+    if(!mode_4m30 && !mode_720p){
+        fprintf(stderr,"ERROR: sensor_cfg.ini 需为 GC4653 4M_30FPS 或 720P_60FPS\n");
         close(server);return 3;
     }
     CVI_VI_SetDevNum(ini.devNum);
@@ -236,7 +242,9 @@ int main(int argc,char** argv){
     if(getenv("PREVIEW_DIAG_LINEAR"))cfg.astViInfo[0].stChnInfo.enCompressMode=COMPRESS_MODE_NONE;
     printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
     printf("STEP sys_init begin\n");fflush(stdout);
-    SIZE_S size{1280,720};int sys_rc=SAMPLE_PLAT_SYS_INIT(size);
+    SIZE_S size = mode_4m30 ? SIZE_S{2560,1440} : SIZE_S{1280,720};
+    printf("SENSOR_MODE %s size=%ux%u\n", mode_4m30?"4M_30FPS":"720P_60FPS", size.u32Width, size.u32Height);
+    int sys_rc=SAMPLE_PLAT_SYS_INIT(size);
     printf("STEP sys_init rc=%d\n",sys_rc);fflush(stdout);
     if(sys_rc){close(server);return 4;}
     int vi_rc=SAMPLE_PLAT_VI_INIT(&cfg);
@@ -249,8 +257,8 @@ int main(int argc,char** argv){
     VENC_CHN_ATTR_S attr{};
     // JPEG single-frame mode has no MJPEG frame-rate-control field.
     attr.stVencAttr.enType=PT_JPEG;
-    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=1280;
-    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=720;
+    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=size.u32Width;
+    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=size.u32Height;
     attr.stVencAttr.u32BufSize=2*1024*1024;attr.stVencAttr.bByFrame=CVI_TRUE;
     attr.stVencAttr.stAttrJpege.bSupportDCF=CVI_FALSE;
     attr.stVencAttr.stAttrJpege.stMPFCfg.u8LargeThumbNailNum=0;
@@ -348,7 +356,7 @@ int main(int argc,char** argv){
                 frame.stVFrame.pu8VirAddr[1]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[1],su);
             }
             static unsigned char gy[168*168],gu[84*84],gv[84*84];
-            const int S=4,w=W/S,h=H/S,cw=w/2,ch=h/2;
+            const int S=(W>=2000)?8:4,w=W/S,h=H/S,cw=w/2,ch=h/2;
             if(frame.stVFrame.pu8VirAddr[0] && w<=168 && h<=168){
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
                 const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];

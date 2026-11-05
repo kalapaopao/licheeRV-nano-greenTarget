@@ -31,3 +31,7 @@ run_seconds: 120
 # Recording switch: true = every start records an MJPEG/AVI into recordings/
 # (no --recoding argument needed); false = preview only.
 record_enable: false
+
+# Web preview bind: auto = all interfaces (USB 10.133.124.1 AND Wi-Fi both work);
+# usb = USB NIC only; wifi = Wi-Fi NIC only.
+web_ip: auto

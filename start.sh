@@ -33,6 +33,8 @@ BLC_B=256
 JPEG_QUALITY=85
 RUN_SECONDS=120
 RECORD_ENABLE=false
+RECORDING=0
+WEB_BIND=auto
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -65,12 +67,14 @@ while IFS= read -r line || [ -n "$line" ]; do
         jpeg_quality) JPEG_QUALITY=$value;;
         run_seconds) RUN_SECONDS=$value;;
         record_enable) RECORD_ENABLE=$value;;
+        web_ip) WEB_BIND=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
 
 case "$EXPOSURE_MODE" in manual|auto) ;; *) config_error 'exposure_mode must be manual or auto';; esac
 case "$RECORD_ENABLE" in true|false) ;; *) config_error 'record_enable must be true or false';; esac
+case "$WEB_BIND" in auto|usb|wifi) ;; *) config_error 'web_ip must be auto, usb or wifi';; esac
 case "$BLC_MODE" in manual|default) ;; *) config_error 'black_level_mode must be manual or default';; esac
 validate_integer manual_exposure_us "$MANUAL_EXP_US" 100 10000
 validate_integer manual_analog_gain_x1024 "$MANUAL_AGAIN" 1024 16384
@@ -187,6 +191,11 @@ export LD_LIBRARY_PATH=/mnt/system/usr/lib:/mnt/system/usr/lib/3rd:/usr/bin/lib
 # Listen on actual Wi-Fi IP; fallback USB NCM so browsers on either link can preview.
 WEB_IP=$(ifconfig wlan0 2>/dev/null | awk '/inet addr:/ {sub(/^addr:/, "", $2); print $2; exit}')
 [ -n "$WEB_IP" ] || WEB_IP=10.133.124.1
+case "$WEB_BIND" in
+    auto) export WEB_IP_BIND=auto; WEB_IP=0.0.0.0;;
+    usb)  export WEB_IP_BIND=10.133.124.1; WEB_IP=10.133.124.1;;
+    wifi) export WEB_IP_BIND=$(ifconfig wlan0 2>/dev/null | awk '/inet addr:/ {sub(/^addr:/, "", $2); print $2; exit}'); WEB_IP=$WEB_IP_BIND;;
+esac
 export PREVIEW_DIAG_LINEAR=1
 if [ "$RECORDING" -eq 1 ]; then
     RECORD_DIR="$ROOT/recordings"
