@@ -253,24 +253,29 @@ int main(int argc,char** argv){
     printf("sensor_mode=%s preview=1280x720 quality=%u preview_limiter=none exposure_mode=%s\n",mode,quality,exposure_mode);
     printf("RECORD80_BLC_CONFIG mode=%s offsets=%u,%u,%u,%u\n",blc_mode,blc_r,blc_gr,blc_gb,blc_b);
     SAMPLE_INI_CFG_S ini{};SAMPLE_VI_CONFIG_S cfg{};
-    // 传感器模式由板端 /mnt/data/sensor_cfg.ini 决定，本工程要求 720P@60(10bit)。
-    // 说明：该模式的枚举常量来自板端镜像的 SDK，交叉编译所用的 SDK 没有同名符号，
-    // 所以这里不硬编码覆盖，只校验"不是 4M@30 模式"。
+    // 传感器模式：与 80fps 原版（camera_36record.cpp）完全一致的做法 ——
+    // 无论 /mnt/data/sensor_cfg.ini 写的是什么，都在代码里覆盖为 720P_60FPS，
+    // 再配合 36MHz 时钟（0x030028c4 = 0x00210001）得到约 80fps。
+    // 关键在于驱动：src/sensor/ 里的用户态驱动带 GC4653_MODE_1280X720P60
+    // （SDK 预编译的 libsns_gc4653 只有 1440P，强行跑 720P 会色道错位变全绿）。
     if(SAMPLE_COMM_VI_ParseIni(&ini)){close(server);return 3;}
-    bool mode_4m30 = (ini.enSnsType[0]==GCORE_GC4653_MIPI_4M_30FPS_10BIT);
-    bool mode_720p = (ini.enSnsType[0]==GCORE_GC4653_MIPI_720P_60FPS_10BIT);
-    if(!mode_4m30 && !mode_720p){
-        fprintf(stderr,"ERROR: sensor_cfg.ini 需为 GC4653 4M_30FPS 或 720P_60FPS\n");
-        close(server);return 3;
-    }
+    const bool mode_720p = getenv("SENSOR_4M30") ? false : true;
+    if(mode_720p) ini.enSnsType[0]=GCORE_GC4653_MIPI_720P_60FPS_10BIT;
     CVI_VI_SetDevNum(ini.devNum);
     if(SAMPLE_COMM_VI_IniToViCfg(&ini,&cfg)){close(server);return 3;}
     if(getenv("PREVIEW_DIAG_LINEAR"))cfg.astViInfo[0].stChnInfo.enCompressMode=COMPRESS_MODE_NONE;
     printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
     printf("STEP sys_init begin\n");fflush(stdout);
-    SIZE_S size = mode_4m30 ? SIZE_S{2560,1440} : SIZE_S{1280,720};
-    printf("SENSOR_MODE %s size=%ux%u\n", mode_4m30?"4M_30FPS":"720P_60FPS", size.u32Width, size.u32Height);
-    int sys_rc=SAMPLE_PLAT_SYS_INIT(size);
+    SIZE_S size = mode_720p ? SIZE_S{1280,720} : SIZE_S{2560,1440};
+    printf("SENSOR_MODE %s size=%ux%u\n", mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height);
+    // VB 池按传感器实际输出尺寸分配：720P 模式下传感器出 1920x1080（见仓库
+    // sample_common_sensor.c 的 PIC_1080P），若按 1280x720 分配会 vi_sdk_enable_chn OOM。
+    { SIZE_S pool = mode_720p ? SIZE_S{1920,1080} : size;
+      printf("POOL_SIZE %ux%u\n", pool.u32Width, pool.u32Height);
+      int rc2=SAMPLE_PLAT_SYS_INIT(pool);
+      printf("STEP sys_init rc=%d\n",rc2);fflush(stdout);
+      if(rc2){close(server);return 4;} }
+    int sys_rc=0;
     printf("STEP sys_init rc=%d\n",sys_rc);fflush(stdout);
     if(sys_rc){close(server);return 4;}
     int vi_rc=SAMPLE_PLAT_VI_INIT(&cfg);
@@ -283,8 +288,14 @@ int main(int argc,char** argv){
     VENC_CHN_ATTR_S attr{};
     // JPEG single-frame mode has no MJPEG frame-rate-control field.
     attr.stVencAttr.enType=PT_JPEG;
-    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=size.u32Width;
-    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=size.u32Height;
+    // VENC 尺寸必须与 VI 实际输出一致（720P 模式下 VI 实际是 1920x1080），
+    // 否则 VENC 每帧要做尺寸不匹配的缩放，帧率减半。
+    SIZE_S vsz = size;
+    { VI_CHN_ATTR_S va{}; if(!CVI_VI_GetChnAttr(0,0,&va) && va.stSize.u32Width && va.stSize.u32Height){
+        vsz.u32Width=va.stSize.u32Width; vsz.u32Height=va.stSize.u32Height; } }
+    printf("VENC size=%ux%u\n", vsz.u32Width, vsz.u32Height);
+    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=vsz.u32Width;
+    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=vsz.u32Height;
     attr.stVencAttr.u32BufSize=2*1024*1024;attr.stVencAttr.bByFrame=CVI_TRUE;
     attr.stVencAttr.stAttrJpege.bSupportDCF=CVI_FALSE;
     attr.stVencAttr.stAttrJpege.stMPFCfg.u8LargeThumbNailNum=0;
