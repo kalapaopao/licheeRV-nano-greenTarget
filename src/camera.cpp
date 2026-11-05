@@ -351,7 +351,7 @@ int main(int argc,char** argv){
             if(frame.stVFrame.pu8VirAddr[0]==nullptr){
                 // 映射 Y + UV 平面（只需一次的物理地址→虚拟地址）
                 unsigned sy=frame.stVFrame.u32Stride[0]*H;
-                unsigned su=frame.stVFrame.u32Stride[1]*(H/2);
+                unsigned su=frame.stVFrame.u32Stride[1]*((H+1)/2);   /* 半平面行数，含奇数行余量 */
                 frame.stVFrame.pu8VirAddr[0]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[0],sy);
                 frame.stVFrame.pu8VirAddr[1]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[1],su);
             }
@@ -361,9 +361,20 @@ int main(int argc,char** argv){
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
                 const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];
                 unsigned ystride=frame.stVFrame.u32Stride[0],uvstride=frame.stVFrame.u32Stride[1];
-                for(int yy=0;yy<h;++yy){const unsigned char*r=Yp+(size_t)(yy*S)*ystride;
-                    for(int xx=0;xx<w;++xx)gy[(size_t)yy*w+xx]=r[xx*S];}
-                for(int yy=0;yy<ch;++yy){const unsigned char*r=UVp+(size_t)(yy*S)*uvstride;
+                const unsigned y_rows=frame.stVFrame.u32Length[0]/ystride; /* Y 有效行数 */
+                const unsigned uv_rows=frame.stVFrame.u32Length[1]/frame.stVFrame.u32Stride[1];
+                for(int yy=0;yy<h;++yy){
+                    const unsigned r0=(yy*S < y_rows-1) ? yy*S : (y_rows-1);
+                    const unsigned r1=(yy*S+1 < y_rows) ? (yy*S+1) : r0;
+                    const unsigned char*a=Yp+(size_t)r0*ystride;
+                    const unsigned char*b=Yp+(size_t)r1*ystride;
+                    for(int xx=0;xx<w;++xx){
+                        const unsigned c0=xx*S, c1=(xx*S+1<W)?(xx*S+1):(xx*S);
+                        unsigned m=a[c0]; if(a[c1]>m)m=a[c1]; if(b[c0]>m)m=b[c0]; if(b[c1]>m)m=b[c1];
+                        gy[(size_t)yy*w+xx]=(unsigned char)m;}}
+                for(int yy=0;yy<ch;++yy){
+                    const unsigned ur=(yy*S < uv_rows) ? yy*S : (uv_rows?uv_rows-1:0);
+                    const unsigned char*r=UVp+(size_t)ur*uvstride;
                     for(int xx=0;xx<cw;++xx){gu[(size_t)yy*cw+xx]=r[(xx*S)*2];gv[(size_t)yy*cw+xx]=r[(xx*S)*2+1];}}
                 ++green_frames;
                 const greendet::TrackState& st=g_tracker.process(gy,gu,gv,w,h);

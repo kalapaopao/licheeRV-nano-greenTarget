@@ -23,8 +23,8 @@ struct Config {
   // ---- 颜色判据（YUV 域）----
   int u_max = 124;        // U < u_max 且 V < v_max ⇒ 绿色方向（128 为中性）
   int v_max = 124;
-  int y_min = 120;        // 发光亮度下限（严格检测）
-  int sat_min = 40;       // 饱和度下限 = sqrt((U-128)^2 + (V-128)^2)
+  int y_min = 100;        // 发光亮度下限（严格检测）
+  int sat_min = 30;       // 饱和度下限 = sqrt((U-128)^2 + (V-128)^2)
   int y_fallback = 60;    // 回退检测（目标变暗时，仅在门控内启用）
   int sat_fallback = 25;
 
