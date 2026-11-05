@@ -268,8 +268,8 @@ int main(int argc,char** argv){
     printf("STEP sys_init begin\n");fflush(stdout);
     SIZE_S size = mode_720p ? SIZE_S{1280,720} : SIZE_S{2560,1440};
     printf("SENSOR_MODE %s size=%ux%u\n", mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height);
-    // VB 池按传感器实际输出尺寸分配：720P 模式下传感器出 1920x1080（见仓库
-    // sample_common_sensor.c 的 PIC_1080P），若按 1280x720 分配会 vi_sdk_enable_chn OOM。
+    // VB 池按 VI 实际输出尺寸分配：720P 模式下 VI 实际是 1920x1080
+    // （传感器该模式输出 1920x1080 raw）。按 1280x720 分配会 vi_sdk_enable_chn OOM。
     { SIZE_S pool = mode_720p ? SIZE_S{1920,1080} : size;
       printf("POOL_SIZE %ux%u\n", pool.u32Width, pool.u32Height);
       int rc2=SAMPLE_PLAT_SYS_INIT(pool);
@@ -288,14 +288,8 @@ int main(int argc,char** argv){
     VENC_CHN_ATTR_S attr{};
     // JPEG single-frame mode has no MJPEG frame-rate-control field.
     attr.stVencAttr.enType=PT_JPEG;
-    // VENC 尺寸必须与 VI 实际输出一致（720P 模式下 VI 实际是 1920x1080），
-    // 否则 VENC 每帧要做尺寸不匹配的缩放，帧率减半。
-    SIZE_S vsz = size;
-    { VI_CHN_ATTR_S va{}; if(!CVI_VI_GetChnAttr(0,0,&va) && va.stSize.u32Width && va.stSize.u32Height){
-        vsz.u32Width=va.stSize.u32Width; vsz.u32Height=va.stSize.u32Height; } }
-    printf("VENC size=%ux%u\n", vsz.u32Width, vsz.u32Height);
-    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=vsz.u32Width;
-    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=vsz.u32Height;
+    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=size.u32Width;
+    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=size.u32Height;
     attr.stVencAttr.u32BufSize=2*1024*1024;attr.stVencAttr.bByFrame=CVI_TRUE;
     attr.stVencAttr.stAttrJpege.bSupportDCF=CVI_FALSE;
     attr.stVencAttr.stAttrJpege.stMPFCfg.u8LargeThumbNailNum=0;

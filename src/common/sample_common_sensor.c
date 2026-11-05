@@ -569,7 +569,7 @@ CVI_S32 SAMPLE_COMM_SNS_GetPicSize(PIC_SIZE_E enPicSize, SIZE_S *pstSize)
 		pstSize->u32Height = 480;
 		break;
 
-	case PIC_720P:   /* 1280 * 720 */
+	case PIC_720P:   /* 1280 * 720（本工程复用为 1080p timing，见下）*/
 		pstSize->u32Width  = 1920;
 		pstSize->u32Height = 1080;
 		break;
