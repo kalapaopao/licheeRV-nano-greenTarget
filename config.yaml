@@ -27,3 +27,7 @@ jpeg_quality: 85
 
 # Default run length in seconds, valid range: 20..300.
 run_seconds: 120
+
+# Recording switch: true = every start records an MJPEG/AVI into recordings/
+# (no --recoding argument needed); false = preview only.
+record_enable: false

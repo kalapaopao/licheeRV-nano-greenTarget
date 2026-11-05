@@ -32,6 +32,7 @@ BLC_GB=256
 BLC_B=256
 JPEG_QUALITY=85
 RUN_SECONDS=120
+RECORD_ENABLE=false
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -63,11 +64,13 @@ while IFS= read -r line || [ -n "$line" ]; do
         black_level_b) BLC_B=$value;;
         jpeg_quality) JPEG_QUALITY=$value;;
         run_seconds) RUN_SECONDS=$value;;
+        record_enable) RECORD_ENABLE=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
 
 case "$EXPOSURE_MODE" in manual|auto) ;; *) config_error 'exposure_mode must be manual or auto';; esac
+case "$RECORD_ENABLE" in true|false) ;; *) config_error 'record_enable must be true or false';; esac
 case "$BLC_MODE" in manual|default) ;; *) config_error 'black_level_mode must be manual or default';; esac
 validate_integer manual_exposure_us "$MANUAL_EXP_US" 100 10000
 validate_integer manual_analog_gain_x1024 "$MANUAL_AGAIN" 1024 16384
@@ -84,15 +87,17 @@ validate_integer black_level_b "$BLC_B" 0 4095
 validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
 validate_integer run_seconds "$RUN_SECONDS" 20 300
 
-RECORDING=0
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
-    echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS"
+    echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE"
     exit 0
 fi
 if [ "$DURATION" = '--recoding' ] || [ "$DURATION" = '--recording' ]; then
     RECORDING=1
     DURATION=${2:-$RUN_SECONDS}
+fi
+if [ "$RECORD_ENABLE" = 'true' ]; then
+    RECORDING=1
 fi
 validate_integer duration "$DURATION" 20 300
 
@@ -112,7 +117,7 @@ export RECORD80_BLC_GR="$BLC_GR"
 export RECORD80_BLC_GB="$BLC_GB"
 export RECORD80_BLC_B="$BLC_B"
 export RECORD80_JPEG_QUALITY="$JPEG_QUALITY"
-echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY duration=$DURATION recording=$RECORDING"
+echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY duration=$DURATION recording=$RECORDING record_enable=$RECORD_ENABLE"
 REG=0x030028c4
 ORIG=0x00200001
 TARGET=0x00210001
