@@ -1,0 +1,45 @@
+#!/bin/sh
+# S99flycamera - auto start fly_LicheeRV camera streaming on boot (wireless)
+# Managed by project: /code/fly_LicheeRV
+# Waits for Wi-Fi to obtain an IP before starting the preview service.
+
+ROOT=/code/fly_LicheeRV
+CONF="$ROOT/config_boot.yaml"
+LOG=/tmp/fly_boot.log
+
+start() {
+    # Give wlan0 time to associate and get a DHCP lease (S30wifi runs earlier).
+    i=0
+    while [ $i -lt 30 ]; do
+        ip=$(ifconfig wlan0 2>/dev/null | awk '/inet addr:/ {sub(/^addr:/,"",$2); print $2; exit}')
+        [ -n "$ip" ] && break
+        sleep 1
+        i=$((i + 1))
+    done
+
+    if [ ! -x "$ROOT/camera" ]; then
+        echo "S99flycamera: missing $ROOT/camera" >> "$LOG"
+        return 3
+    fi
+    if [ ! -f "$CONF" ]; then
+        echo "S99flycamera: missing $CONF" >> "$LOG"
+        return 3
+    fi
+
+    cd "$ROOT" || return 3
+    # AUTO_BOOT=1 tells start.sh to use the boot-specific config file.
+    AUTO_BOOT=1 sh "$ROOT/start.sh" >> "$LOG" 2>&1 &
+    echo "S99flycamera: started (wlan0=$ip)" >> "$LOG"
+}
+
+stop() {
+    sh "$ROOT/stop.sh" >> "$LOG" 2>&1
+    echo "S99flycamera: stopped" >> "$LOG"
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 2; start ;;
+    *)       echo "usage: $0 {start|stop|restart}" ;;
+esac

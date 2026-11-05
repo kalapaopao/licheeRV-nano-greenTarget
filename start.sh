@@ -3,6 +3,9 @@
 set -eu
 ROOT=/code/fly_LicheeRV
 CONFIG=${FLY_CONFIG_FILE:-$ROOT/config.yaml}
+# Auto-boot mode: use a dedicated always-on config, do not disturb the
+# interactive config.yaml used for manual runs / tests.
+[ "${AUTO_BOOT:-0}" = "1" ] && CONFIG=/code/fly_LicheeRV/config_boot.yaml
 
 # Limited flat-YAML reader: no eval/source, no nested structures, no silent typos.
 config_error() { echo "CONFIG_ERROR: $*" >&2; exit 2; }
@@ -89,7 +92,7 @@ validate_integer black_level_gr "$BLC_GR" 0 4095
 validate_integer black_level_gb "$BLC_GB" 0 4095
 validate_integer black_level_b "$BLC_B" 0 4095
 validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
-validate_integer run_seconds "$RUN_SECONDS" 20 300
+[ "$RUN_SECONDS" -eq 0 ] || validate_integer run_seconds "$RUN_SECONDS" 20 300
 
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
@@ -103,7 +106,7 @@ fi
 if [ "$RECORD_ENABLE" = 'true' ]; then
     RECORDING=1
 fi
-validate_integer duration "$DURATION" 20 300
+[ "$DURATION" -eq 0 ] || validate_integer duration "$DURATION" 20 300
 
 # Exactly the values validated above are passed to the C++ ISP/VENC controls.
 export RECORD80_EXPOSURE_MODE="$EXPOSURE_MODE"
@@ -217,6 +220,8 @@ fi
 ERROR_BEFORE=$(awk '/^[ ]*0[ ]+[0-9]+[ ]+[0-9]+[ ]+[0-9]+/{print $2,$3,$4,$5,$6;exit}' /proc/mipi-rx)
 # If the supervisor is forcibly killed, recover its camera and clock at the deadline.
 # Ownership checks prevent an old guard from killing a new session or touching its clock.
+# With run_seconds=0 (always-on) there is no deadline, so no guard is spawned.
+if [ "$DURATION" -gt 0 ]; then
 (
     sleep $((DURATION + 20))
     if [ -r "$LOCK/supervisor.pid" ] && [ "$(cat "$LOCK/supervisor.pid")" = "$$" ] &&
@@ -236,6 +241,7 @@ ERROR_BEFORE=$(awk '/^[ ]*0[ ]+[0-9]+[ ]+[0-9]+[ ]+[0-9]+/{print $2,$3,$4,$5,$6;
 ) &
 GUARD_PID=$!
 printf '%s\n' "$GUARD_PID" > "$LOCK/guard.pid"
+fi
 CHANGED=1
 devmem "$REG" 32 "$TARGET"
 [ "$(clock)" = "$TARGET" ] || { echo CLOCK_SWITCH_FAILED; exit 5; }
@@ -246,7 +252,7 @@ fi
 echo "WEB_READY http://$WEB_IP:8081/"
 START=$(date +%s)
 LAST_STATS=''
-while [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
+while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
     sleep 3
     kill -0 "$CAM_PID" 2>/dev/null || { echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
     TEMP=$(cat /sys/class/thermal/thermal_zone0/temp)
@@ -260,4 +266,4 @@ while [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
         LAST_STATS=$NEW_STATS
     fi
 done
-echo TEST_COMPLETED
+if [ "$DURATION" -eq 0 ]; then echo RUN_ENDED_UNEXPECTEDLY; else echo TEST_COMPLETED; fi
