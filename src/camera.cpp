@@ -355,9 +355,9 @@ int main(int argc,char** argv){
                 frame.stVFrame.pu8VirAddr[0]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[0],sy);
                 frame.stVFrame.pu8VirAddr[1]=(unsigned char*)CVI_SYS_Mmap(frame.stVFrame.u64PhyAddr[1],su);
             }
-            static unsigned char gy[168*168],gu[84*84],gv[84*84];
+            static unsigned char gy[320*180],gu[160*90],gv[160*90];
             const int S=(W>=2000)?8:4,w=W/S,h=H/S,cw=w/2,ch=h/2;
-            if(frame.stVFrame.pu8VirAddr[0] && w<=168 && h<=168){
+            if(frame.stVFrame.pu8VirAddr[0] && w<=320 && h<=180){
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
                 const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];
                 unsigned ystride=frame.stVFrame.u32Stride[0],uvstride=frame.stVFrame.u32Stride[1];
