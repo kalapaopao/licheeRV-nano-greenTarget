@@ -70,15 +70,44 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 
 ## 环境与重建
 
-`E:\study\LicheeRV\env\` 下保存了完整交叉编译环境：
+编译只需要 Windows 侧的 `E:\study\LicheeRV\env\`，**WSL 只当执行器**（文件全在 Windows）：
 
-| 目录 | 内容 |
-|---|---|
-| `toolchain/` | RISC-V musl 交叉工具链 |
-| `sipeed-sdk-build/` | 自编 SDK 静态库（libvpu/libvenc/libisp/libsample/libsns_gc4653 等 28 个）+ 头文件 + 内核 uapi 头 |
-| `sipeed-sdk/` | Sipeed 官方 SDK 源码（middleware/osdrv/build，可重建上表静态库） |
+| 目录 | 内容 | 编译时是否必需 |
+|---|---|---|
+| `toolchain/` | RISC-V musl 交叉工具链（Xuantie-900 gcc 10.2.0） | 必需 |
+| `sipeed-sdk-build/include/` | 87 个头（顶层 70 + `isp/` 13 + `sample/` 4） | 必需 |
+| `sipeed-sdk-build/kernel_include/` | 54 个内核 + CVITEK 私有 uapi 头 | 必需 |
+| `sipeed-sdk-build/lib_dyn/` | **17 个板端 .so**（从板子拷回，链接期使用） | 必需 |
+| `sipeed-sdk-build/lib/` | 28 个自编 `.a`；最终链接**只用 `libini.a`** | 部分 |
 
-SDK 驱动补丁（相对官方源码）：
-1. `middleware/v2/component/isp/sensor/sg200x/gcore_gc4653/gc4653_cmos.c` —
-   `cmos_set_image_mode` 接受 1440P 范围内的任意尺寸（原版只认 1440P@≤30fps）
-2. 链接时**排除 `libsns_full.a`**（内含旧版 GC4653 驱动，会覆盖补丁版）
+> **WSL 里另有一棵 3.7 GB 的 `~/sipeed_sdk` 源码/编译树**，仅用于「重新交叉编译
+> middleware」，日常编译本项目**不需要**它。它是什么、能否删、怎么重建，见
+> [docs/HANDOFF_WSL_BUILD_ENV.md](docs/HANDOFF_WSL_BUILD_ENV.md)。
+
+### 编译方式与本项目的构成
+
+最终产物 = **板端 .so（动态链接）+ 本项目源码编译的驱动与 sample 层**：
+
+```
+src/sensor/      用户态 GC4653 驱动（含真正的 720P 寄存器表）
+src/common/      项目自带的 sample 层（720P 模式按 1280x720 配置）
+src/camera.cpp   主程序
+src/green_detect.cpp  检测算法
+```
+
+链接：`lib_dyn` 里的板端 `.so`（`libsys/libvpu/libvenc/libisp/...`）+ 静态 `libini.a`。
+
+### 为什么不用自编的 .a 去链接
+
+自编 `.a` 与板端驱动在 720P 路径上 ABI 不一致，曾表现为
+`vi_sdk_enable_chn NG` 与**全绿画面**。改用板端 `.so` + 源码编译
+`sensor/common` 之后，80fps 与正确颜色才同时成立。
+完整取证见 [docs/HANDOFF_ISSUE_720p_80fps.md](docs/HANDOFF_ISSUE_720p_80fps.md)。
+
+### 已验证的产物
+
+```
+build/bin/camera   451,816 字节   RISC-V musl
+运行时依赖 12 个板端 .so，均存在于 /mnt/system/usr/lib
+```
+
