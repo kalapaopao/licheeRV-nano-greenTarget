@@ -68,6 +68,24 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 - 停止请用 `sh stop.sh` 或 Ctrl+C，**不要 kill -9**（会残留 VPSS 状态，需重启板子）。
 - 录像码率约 4MB/s，长录注意 TF 卡空间（`recordings/` 需定期清理）。
 
+## 代码怎么读
+
+不知道从哪里开始看 → **[docs/READING_GUIDE.md](docs/READING_GUIDE.md)**
+
+一句话版：真正要读的只有约 1100 行（src/camera.cpp 493 + src/green_detect.cpp 335
++ green_detect.h 113 + vi_mjpeg.h 160）；src/common/ 和 src/sensor/ 下约 7000 行
+是厂商 sample 代码，只在报错时查。
+
+推荐顺序：
+
+1. green_detect.h 22~50 行 —— 全部可调参数
+2. green_detect.cpp 122~267 行 —— 检测主流程
+3. green_detect.cpp 272~338 行 —— 跟踪三态机
+4. camera.cpp 319~497 行 —— 主循环（核心）
+5. camera.cpp 158~191 行 —— 编码线程
+
+---
+
 ## 环境与重建
 
 编译只需要 Windows 侧的 `E:\study\LicheeRV\env\`，**WSL 只当执行器**（文件全在 Windows）：

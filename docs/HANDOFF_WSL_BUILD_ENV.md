@@ -7,7 +7,7 @@
 - 记录日期：2026-11-06
 - 位置：WSL（Ubuntu 22.04，ext4 vhdx 在 `D:\WSL\Ubuntu-22.04\ext4.vhdx`）
 - 路径：`/home/admin123/sipeed_sdk`（即 `~/sipeed_sdk`）
-- 大小：**3.7 GB**
+- 大小：**2.4 GB**
 
 ---
 
@@ -28,7 +28,7 @@
 ## 二、里面到底有什么
 
 ```
-~/sipeed_sdk/                    3.7 GB   Sipeed 官方仓库稀疏克隆
+~/sipeed_sdk/                    2.4 GB   Sipeed 官方仓库稀疏克隆
 ├── middleware/                  259 MB   ★ 中间件源码（VI/VPU/VENC/ISP/SAMPLE）
 │   └── v2/
 │       ├── lib/                 60 MB    ★ 编译出的 26 个 .a
