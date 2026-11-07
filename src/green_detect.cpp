@@ -254,6 +254,9 @@ bool Detector::detectFrame(const uint8_t* y, const uint8_t* u, const uint8_t* v,
         best.fill = fill;
         best.sat = sat;
         best.val = static_cast<float>(yy);
+        // 长宽比统一取「长边/短边」>=1，与 HERO 的 aspect_ratio 口径一致
+        best.aspect = (bw > bh) ? (static_cast<float>(bw) / static_cast<float>(bh))
+                                : (static_cast<float>(bh) / static_cast<float>(bw));
         best.fallback = fallback_used;
         found = true;
       }
@@ -264,6 +267,137 @@ bool Detector::detectFrame(const uint8_t* y, const uint8_t* u, const uint8_t* v,
     *out = best;
   }
   return found;
+}
+
+// ---------------------------------------------------------------------------
+// 多候选收集：共用 buildMask / morphOpen，但收集全部通过形状过滤的连通域
+// （不做门控）。用于「多目标筛选 + 加权评分」链路。
+// ---------------------------------------------------------------------------
+int Detector::detectMulti(const uint8_t* y, const uint8_t* u, const uint8_t* v,
+                          int w, int h, Blob* out, int max_out) {
+  if (out == nullptr || max_out <= 0 || y == nullptr || u == nullptr || v == nullptr ||
+      w <= 2 || h <= 2) {
+    return 0;
+  }
+
+  int n = 0;
+  buildMask(y, u, v, w, h, false, 0.0f, 0.0f, 0.0f, &n);
+  mask_pixels_ = n;
+  if (n == 0) {
+    return 0;
+  }
+
+  morphOpen(w, h);
+
+  static thread_local std::vector<int> visited;
+  visited.assign(mask_.size(), 0);
+  stack_.clear();
+
+  int count = 0;
+  const int cw = w >> 1;
+
+  for (int sy = 0; sy < h; ++sy) {
+    for (int sx = 0; sx < w; ++sx) {
+      const size_t sidx = static_cast<size_t>(sy) * w + sx;
+      if (!mask_[sidx] || visited[sidx]) {
+        continue;
+      }
+      stack_.push_back(static_cast<int>(sidx));
+      visited[sidx] = 1;
+      int area = 0;
+      int minx = sx, maxx = sx, miny = sy, maxy = sy;
+      double sumx = 0.0, sumy = 0.0;
+      while (!stack_.empty()) {
+        const int cur = stack_.back();
+        stack_.pop_back();
+        const int cy_ = cur / w;
+        const int cx_ = cur % w;
+        ++area;
+        sumx += cx_;
+        sumy += cy_;
+        if (cx_ < minx) minx = cx_;
+        if (cx_ > maxx) maxx = cx_;
+        if (cy_ < miny) miny = cy_;
+        if (cy_ > maxy) maxy = cy_;
+        for (int dy = -1; dy <= 1; ++dy) {
+          for (int dx = -1; dx <= 1; ++dx) {
+            const int ny = cy_ + dy;
+            const int nx = cx_ + dx;
+            if (ny < 0 || ny >= h || nx < 0 || nx >= w) {
+              continue;
+            }
+            const size_t nidx = static_cast<size_t>(ny) * w + nx;
+            if (mask_[nidx] && !visited[nidx]) {
+              visited[nidx] = 1;
+              stack_.push_back(static_cast<int>(nidx));
+            }
+          }
+        }
+      }
+
+      // ---- 形状过滤（与 detectFrame 用同一套阈值）----
+      const float farea = static_cast<float>(area);
+      if (farea < cfg_.area_min || farea > cfg_.area_max) {
+        continue;
+      }
+      const int bw = maxx - minx + 1;
+      const int bh = maxy - miny + 1;
+      const float bbox = static_cast<float>(bw) * static_cast<float>(bh);
+      if (bbox <= 0.0f) {
+        continue;
+      }
+      const float fill = farea / bbox;
+      if (fill < cfg_.fill_min) {
+        continue;
+      }
+      const float asp = static_cast<float>(bw) / static_cast<float>(bh);
+      if (asp < cfg_.aspect_min || asp > cfg_.aspect_max) {
+        continue;
+      }
+      const float radius = std::sqrt(farea / 3.14159265f);
+      if (radius < cfg_.radius_min || radius > cfg_.radius_max) {
+        continue;
+      }
+
+      const float ccx = static_cast<float>(sumx / area);
+      const float ccy = static_cast<float>(sumy / area);
+
+      const int ci = (static_cast<int>(ccy) >> 1) * cw + (static_cast<int>(ccx) >> 1);
+      const int uu = u[ci];
+      const int vv = v[ci];
+      const int yy = y[static_cast<int>(ccy) * w + static_cast<int>(ccx)];
+      const float sat = std::sqrt(static_cast<float>(uv_dist2(uu, vv)));
+
+      Blob b;
+      b.cx = ccx;
+      b.cy = ccy;
+      b.area = farea;
+      b.radius = radius;
+      b.fill = fill;
+      b.sat = sat;
+      b.val = static_cast<float>(yy);
+      b.score = static_cast<float>(yy) + 0.5f * sat;   // 质量分（与 detectFrame 一致）
+      b.aspect = (bw > bh) ? (static_cast<float>(bw) / static_cast<float>(bh))
+                           : (static_cast<float>(bh) / static_cast<float>(bw));
+      b.fallback = false;
+
+      // 按 score 降序插入，只保留前 max_out 个（max_out 很小，插入排序最快）
+      if (count == max_out && b.score <= out[max_out - 1].score) {
+        continue;
+      }
+      int pos = (count < max_out) ? count : (max_out - 1);
+      if (count < max_out) {
+        ++count;
+      }
+      while (pos > 0 && out[pos - 1].score < b.score) {
+        out[pos] = out[pos - 1];
+        --pos;
+      }
+      out[pos] = b;
+    }
+  }
+
+  return count;
 }
 
 // ---------------------------------------------------------------------------

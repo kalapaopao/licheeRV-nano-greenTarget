@@ -66,6 +66,9 @@ target_link_libraries(common_settings INTERFACE
 set(APP_SRC
     src/camera.cpp
     src/green_detect.cpp
+    # 阶段1：多目标筛选 + 卡尔曼（角度域）+ 串口输出
+    src/target_track.cpp
+    src/uart_out.cpp
     # 用户态 GC4653 驱动（含 720P_60FPS 模式表 + 1080P timing），替代 libsns_gc4653.a
     src/sensor/gc4653_cmos.c
     src/sensor/gc4653_sensor_ctl.c

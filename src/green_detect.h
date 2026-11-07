@@ -59,6 +59,7 @@ struct Blob {
   float sat = 0.0f;
   float val = 0.0f;
   float score = 0.0f;
+  float aspect = 1.0f;   // 长宽比，取长边/短边（>=1.0；圆形目标 ≈1）
   bool fallback = false;  // 是否来自回退检测
 };
 
@@ -90,6 +91,13 @@ class Detector {
   bool detectFrame(const uint8_t* y, const uint8_t* u, const uint8_t* v,
                    int w, int h, const float* gate_cx, const float* gate_cy,
                    float gate_r, bool allow_fallback, Blob* out);
+
+  // 收集本帧**全部**通过形状过滤的候选（不做门控），供多目标筛选使用。
+  // 返回写入 out 的数量（<= max_out）。out 按 score 降序排列。
+  // 说明：与 detectFrame 共用 buildMask / morphOpen，但连通域循环独立，
+  //       因此不影响 detectFrame 既有行为。
+  int detectMulti(const uint8_t* y, const uint8_t* u, const uint8_t* v,
+                  int w, int h, Blob* out, int max_out);
 
   // 统计：上一帧通过颜色阈值筛选后的像素数（调试用）
   int lastMaskPixels() const { return mask_pixels_; }

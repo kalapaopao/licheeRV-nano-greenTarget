@@ -19,8 +19,15 @@
 #include <arpa/inet.h>
 #include "avi_mjpeg.h"
 #include "green_detect.h"
-// 绿色圆灯检测：主循环里抽点下采样后调 greendet::Tracker（已板端验证 2.25ms/帧）
-static greendet::Tracker g_tracker;
+#include "target_track.h"
+#include "uart_out.h"
+#include "frame_timing.h"
+// 绿色圆灯检测：主循环里抽点下采样 → 多候选筛选 → 卡尔曼 → 角度 → 串口
+static greendet::Detector g_detector;      // 多候选收集（不门控）
+static gt::TargetTracker g_target;         // 多目标筛选 + 卡尔曼 + 状态机
+static gt::UartOut g_uart;                 // 发给电控（独立线程）
+static bool g_track_on = true;             // track_enable：关闭时退回旧的单目标行为
+static int g_max_candidates = 8;
 static unsigned long green_frames=0,green_hits=0,green_reports=0;
 static double det_total_ms=0.0; static unsigned long det_count=0;
 static double samp_total_ms=0.0, track_total_ms=0.0;
@@ -28,6 +35,26 @@ static int g_detect_stride=1; static unsigned long g_frame_idx=0;
 static int g_sample_steps=2;   // 每块 n×n 采样点数（1..4）
 static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
 static bool g_draw_test_box=false;
+static unsigned long g_uart_sent_prev=0;
+// ---- 帧时间戳（见 frame_timing.h）：帧号 + 采集时刻 + 原始 PTS ----
+// capture_mono_us 是「程序拿到帧」的时刻，不是曝光时刻；u64PTS 单位未实测确认，
+// 只记录和统计，不参与任何计算。
+static uint32_t g_capture_frame_id=0;          // 相机帧号：每成功取到一帧 +1
+static gt::MonoUs g_last_track_capture_us=0;   // 上次真正跑 Tracker 那帧的采集时刻（dt 基准）
+static gt::MonoUs g_last_pub_capture_us=0;     // 最近一次发布给串口那帧的采集时刻
+static uint32_t g_last_pub_frame_id=0;         // 最近一次发布给串口那帧的帧号
+static gt::MonoUs g_last_target_log_us=0;      // GREEN_TARGET 日志限频用
+static double g_det_max_ms=0.0;                // 统计窗口内：抽样→发布 的最大耗时
+static double g_proc_total_ms=0.0,g_proc_max_ms=0.0;  // 抽样→结果完成（不含画框/日志/发布）
+static double g_lat_total_ms=0.0,g_lat_max_ms=0.0;    // 取帧→结果完成
+static const char* target_state_name(gt::TargetState s){
+    switch(s){
+        case gt::TargetState::kConfirmed: return "confirmed";
+        case gt::TargetState::kCoasting:  return "coasting";
+        case gt::TargetState::kLost:      return "lost";
+    }
+    return "lost";
+}
 // NPU is intentionally not linked or implemented in this version.
 extern "C" {
 #include "sample_comm.h"
@@ -56,6 +83,22 @@ static bool env_u32(const char* name,unsigned fallback,unsigned low,unsigned hig
     errno=0;char* end=nullptr;unsigned long v=strtoul(s,&end,10);
     if(errno || *end || v<low || v>high)return false;
     out=static_cast<unsigned>(v);return true;
+}
+// 浮点环境变量：缺失时用 fallback，非法值返回 false（调用方决定是否致命）
+static bool env_f32(const char* name,float fallback,float low,float high,float& out){
+    const char* s=getenv(name);if(!s){out=fallback;return true;}
+    if(!*s)return false;
+    errno=0;char* end=nullptr;double v=strtod(s,&end);
+    if(errno || *end || v<low || v>high)return false;
+    out=static_cast<float>(v);return true;
+}
+// 布尔环境变量：接受 0/1/true/false（大小写不敏感）
+static bool env_flag(const char* name,bool fallback,bool& out){
+    const char* s=getenv(name);if(!s){out=fallback;return true;}
+    if(!*s)return false;
+    if(!strcmp(s,"1")||!strcasecmp(s,"true")||!strcasecmp(s,"on")||!strcasecmp(s,"yes")){out=true;return true;}
+    if(!strcmp(s,"0")||!strcasecmp(s,"false")||!strcasecmp(s,"off")||!strcasecmp(s,"no")){out=false;return true;}
+    return false;
 }
 static std::atomic<int> running(1);
 static_assert(ATOMIC_INT_LOCK_FREE==2,"Signal handler requires lock-free atomic int");
@@ -213,6 +256,89 @@ int main(int argc,char** argv){
     if(getenv("DETECT_SAMPLE_STEPS")){int v=atoi(getenv("DETECT_SAMPLE_STEPS"));if(v>=1&&v<=4)g_sample_steps=v;}
     if(getenv("DETECT_ENABLE") && !strcmp(getenv("DETECT_ENABLE"),"false"))g_detect_on=false;
     if(getenv("DRAW_TEST_BOX") && !strcmp(getenv("DRAW_TEST_BOX"),"1"))g_draw_test_box=true;
+
+    // ---- 阶段1：多目标筛选 + 卡尔曼 + 角度 + 串口 ----
+    // 全部参数来自 YAML（start.sh 转成环境变量）。非法值一律报错退出，
+    // 避免「悄悄用默认值」导致联调时数据算错却没人发现。
+    bool track_on=true, uart_on=false, inv_yaw=false, inv_pitch=false;
+    float cam_fx=1024.0f, cam_fy=1024.0f, cam_cx=640.0f, cam_cy=360.0f;
+    float opt_yaw=0.0f, opt_pitch=0.0f, target_dia=0.05f;
+    float sel_conf=0.5f, sel_aspect=1.5f, sel_maxdist=60.0f;
+    float kf_q=50.0f, kf_r=0.001f, kf_initpos=10.0f, kf_initvel=2.0f;
+    unsigned sel_confirm=5, sel_lost=10, sel_maxcand=8;
+    unsigned uart_baud=115200, uart_rate=50;
+    const char* uart_dev=getenv("UART_DEVICE"); if(!uart_dev||!*uart_dev)uart_dev="/dev/ttyS1";
+
+    bool ok =
+        env_flag("TRACK_ENABLE",true,track_on) &&
+        env_flag("UART_ENABLE",false,uart_on) &&
+        env_flag("CAM_INVERT_YAW",false,inv_yaw) &&
+        env_flag("CAM_INVERT_PITCH",false,inv_pitch) &&
+        env_f32("CAM_FX",1024.0f,1.0f,20000.0f,cam_fx) &&
+        env_f32("CAM_FY",1024.0f,1.0f,20000.0f,cam_fy) &&
+        env_f32("CAM_CX",640.0f,-10000.0f,20000.0f,cam_cx) &&
+        env_f32("CAM_CY",360.0f,-10000.0f,20000.0f,cam_cy) &&
+        env_f32("OPTICAL_YAW_DEG",0.0f,-90.0f,90.0f,opt_yaw) &&
+        env_f32("OPTICAL_PITCH_DEG",0.0f,-90.0f,90.0f,opt_pitch) &&
+        env_f32("TARGET_DIAMETER_M",0.05f,0.001f,10.0f,target_dia) &&
+        env_f32("SEL_CONF_WEIGHT",0.5f,0.0f,1.0f,sel_conf) &&
+        env_f32("SEL_MAX_ASPECT",1.5f,1.0f,10.0f,sel_aspect) &&
+        env_f32("SEL_MAX_DIST_DEG",60.0f,1.0f,180.0f,sel_maxdist) &&
+        env_f32("KF_PROCESS_NOISE",50.0f,0.0f,1e6f,kf_q) &&
+        env_f32("KF_MEASURE_NOISE",0.001f,1e-9f,1e3f,kf_r) &&
+        env_f32("KF_INIT_POS_VAR",10.0f,1e-9f,1e6f,kf_initpos) &&
+        env_f32("KF_INIT_VEL_VAR",2.0f,1e-9f,1e6f,kf_initvel) &&
+        env_u32("SEL_CONFIRM_FRAMES",5,1,1000,sel_confirm) &&
+        env_u32("SEL_LOST_FRAMES",10,1,1000,sel_lost) &&
+        env_u32("SEL_MAX_CANDIDATES",8,1,32,sel_maxcand) &&
+        env_u32("UART_BAUD",115200,1200,4000000,uart_baud) &&
+        env_u32("UART_RATE_HZ",50,1,200,uart_rate);
+    if(!ok){fprintf(stderr,"Invalid track/uart parameter in environment (check config.yaml)\n");return 2;}
+    g_track_on=track_on;
+    g_max_candidates=static_cast<int>(sel_maxcand);
+
+    {
+        gt::CameraCalib calib;
+        calib.fx=cam_fx; calib.fy=cam_fy; calib.cx=cam_cx; calib.cy=cam_cy;
+        calib.optical_yaw_deg=opt_yaw; calib.optical_pitch_deg=opt_pitch;
+        calib.invert_yaw=inv_yaw; calib.invert_pitch=inv_pitch;
+        gt::KalmanCfg kf;
+        kf.process_noise=kf_q; kf.measure_noise=kf_r;
+        kf.init_pos_var=kf_initpos; kf.init_vel_var=kf_initvel;
+        gt::SelectCfg sel;
+        sel.confirm_frames=static_cast<int>(sel_confirm);
+        sel.lost_frames=static_cast<int>(sel_lost);
+        sel.conf_weight=sel_conf; sel.max_aspect=sel_aspect;
+        sel.max_candidates=static_cast<int>(sel_maxcand);
+        sel.max_dist_deg=sel_maxdist;
+        g_target.configure(calib,kf,sel,target_dia);
+        printf("TRACK calib fx=%.2f fy=%.2f cx=%.2f cy=%.2f opt=%.2f/%.2f inv=%d/%d "
+               "confirm=%u lost=%u conf_w=%.2f aspect=%.2f dia=%.3fm\n",
+               cam_fx,cam_fy,cam_cx,cam_cy,opt_yaw,opt_pitch,(int)inv_yaw,(int)inv_pitch,
+               sel_confirm,sel_lost,sel_conf,sel_aspect,target_dia);
+    }
+
+    if(uart_on && !track_on){
+        fprintf(stderr,"uart_enable requires track_enable (nothing to send otherwise)\n");
+        return 2;
+    }
+    if(uart_on){
+        gt::UartCfg uc; uc.enable=true; uc.device=uart_dev;
+        uc.baud=static_cast<int>(uart_baud); uc.rate_hz=static_cast<int>(uart_rate);
+        if(!g_uart.start(uc)){
+            // 串口是联调必需通道，打不开就明确报错退出，而不是静默降级后
+            // 让电控「收不到数据」却查不出原因。需要纯视觉时把 uart_enable 设 false。
+            fprintf(stderr,"UART start failed: %s\n",g_uart.last_error().c_str());
+            return 3;
+        }
+        // 立刻发一帧「无目标」，让电控马上知道视觉已上线
+        gt::TargetOut boot_state;
+        boot_state.detected=false;
+        boot_state.state=gt::TargetState::kLost;
+        boot_state.age_ms=-1.0f;
+        g_uart.publish(boot_state);
+    }
+
     const char* exposure_mode=getenv("RECORD80_EXPOSURE_MODE");
     if(!exposure_mode)exposure_mode="manual";
     if(strcmp(exposure_mode,"auto") && strcmp(exposure_mode,"manual")){fprintf(stderr,"Invalid exposure mode\n");return 2;}
@@ -319,6 +445,12 @@ int main(int argc,char** argv){
     while(running){
         VIDEO_FRAME_INFO_S frame{};
         if(CVI_VI_GetChnFrame(0,0,&frame,1000)){if(running)++timeouts;continue;}
+        // 取帧成功立刻建立帧元数据：帧号 + 原始 PTS + 采集时刻（不是曝光时刻）。
+        // 后面所有异步环节（串口线程）只拿这份 POD 拷贝，绝不持有 VIDEO_FRAME_INFO_S。
+        gt::FrameTiming timing{};
+        timing.frame_id=++g_capture_frame_id;
+        timing.vi_pts_raw=frame.stVFrame.u64PTS;
+        timing.capture_mono_us=gt::monotonic_us();
         double t=now();
         if(!diag_applied && t-start>2){
             diag_applied=true;
@@ -395,8 +527,9 @@ int main(int argc,char** argv){
             }
             static unsigned char gy[320*180],gu[160*90],gv[160*90];
             const int S=(W>=2000)?8:4,w=W/S,h=H/S,cw=w/2,ch=h/2;
-            const bool do_detect = g_detect_on && ((g_frame_idx++ % (unsigned)g_detect_stride)==0);
+            const bool do_detect = g_detect_on && g_track_on && ((g_frame_idx++ % (unsigned)g_detect_stride)==0);
             if(do_detect && frame.stVFrame.pu8VirAddr[0] && w<=320 && h<=180){
+                timing.detect_start_us=gt::monotonic_us();
                 const double td0=now();
                 const unsigned char*Yp=frame.stVFrame.pu8VirAddr[0];
                 const unsigned char*UVp=frame.stVFrame.pu8VirAddr[1];
@@ -431,13 +564,24 @@ int main(int argc,char** argv){
                 samp_total_ms+=(now()-td0)*1000.0;
                 const double td1=now();
                 ++green_frames;
-                const greendet::TrackState& st=g_tracker.process(gy,gu,gv,w,h);
+                // ---- ① 多候选收集：不再只返回最优一个 ----
+                greendet::Blob cands[32];
+                const int ncand=g_detector.detectMulti(gy,gu,gv,w,h,cands,g_max_candidates);
+                // ---- ② 帧间隔：用「采集时刻」差，不把抽样/检测/日志/调度抖动算进 dt ----
+                // 只有真正调用 Tracker::update 的帧才更新基准时刻，因此 detect_stride>1
+                // 时 dt 自然等于跨帧的采集间隔；时间戳缺失/倒退时退回 80fps 默认值。
+                const double t_now=now();
+                const float dt=gt::capture_dt_s(timing.capture_mono_us,g_last_track_capture_us,0.0125f);
+                g_last_track_capture_us=timing.capture_mono_us;
+                // ---- ③ 多目标筛选 + 卡尔曼 + 角度换算 ----
+                const gt::TargetOut& tgt=g_target.update(cands,ncand,S,dt,t_now*1000.0);
+                timing.detect_end_us=gt::monotonic_us();
                 track_total_ms+=(now()-td1)*1000.0;
-                // ---- 把跟踪框叠加到 Y 平面（编码前，网页与录像都能看到）----
+                // ---- ④ 把选中目标的框叠加到 Y 平面（编码前，网页与录像都能看到）----
                 // 纯亮度写入，不涉及色彩转换；框宽 3px，最小半径 12px 保证远处可见。
-                if(g_display_on && st.status!=greendet::Status::kLost){
-                    int cxp=(int)(st.cx*S), cyp=(int)(st.cy*S);
-                    int rp=(int)(st.blob.radius*S)+6; if(rp<12)rp=12;
+                if(g_display_on && tgt.has_box){
+                    int cxp=(int)(tgt.gx*S), cyp=(int)(tgt.gy*S);
+                    int rp=(int)(tgt.gr*S)+6; if(rp<12)rp=12;
                     int x0=cxp-rp, x1=cxp+rp, y0=cyp-rp, y1=cyp+rp;
                     if(x0<0)x0=0; if(y0<0)y0=0;
                     if(x1>(int)W-2)x1=(int)W-2; if(y1>(int)H-2)y1=(int)H-2;
@@ -467,15 +611,35 @@ int main(int argc,char** argv){
                     }
                     CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw, frame.stVFrame.u32Stride[0]*H);
                 }
-                if(st.status!=greendet::Status::kLost){
+                // ---- ⑤ 日志：输出角度/角速度/距离/数据年龄，供联调核对 ----
+                // 限频 10Hz：连续目标时原来 tgt.misses==0 会每帧 printf（80Hz），
+                // 同步写 stdout 会拖慢主循环。计数照常累加，统计由 5 秒日志给出。
+                if(tgt.detected){
                     ++green_hits;
-                    if(green_frames%60==0 || st.misses==0){
-                        printf("GREEN_TARGET status=%s cx=%.1f cy=%.1f r=%.1f hits=%lu frames=%lu\n",
-                               st.status==greendet::Status::kDetected?"detected":"coast",
-                               st.cx*S,st.cy*S,st.blob.radius*S,green_hits,green_frames);
+                    const gt::MonoUs log_now=gt::monotonic_us();
+                    if(log_now-g_last_target_log_us>=100000){
+                        g_last_target_log_us=log_now;
+                        printf("GREEN_TARGET state=%s yaw=%.2f pitch=%.2f vyaw=%.2f vpitch=%.2f "
+                               "dist=%.3f%s age=%.1fms cand=%d px=%.1f,%.1f r=%.1f hits=%lu frame=%u\n",
+                               target_state_name(tgt.state),tgt.yaw_deg,tgt.pitch_deg,
+                               tgt.v_yaw_dps,tgt.v_pitch_dps,tgt.distance_m,
+                               tgt.distance_valid?"":"(invalid)",tgt.age_ms,tgt.candidates,
+                               tgt.gx*S,tgt.gy*S,tgt.gr*S,green_hits,timing.frame_id);
                     }
                 }
-                det_total_ms+=(now()-td0)*1000.0; ++det_count;
+                // 无论有没有目标都发布：电控需要区分「视觉在线但没看到」和「视觉掉线」
+                // 同时把该帧的采集时间戳交给串口线程：它在发送时重算「取帧→发送」年龄，
+                // 只进诊断日志，不改变 ASCII 的 age 字段语义。
+                g_uart.publish(tgt,timing);
+                g_last_pub_capture_us=timing.capture_mono_us;
+                g_last_pub_frame_id=timing.frame_id;
+                const double det_ms=(now()-td0)*1000.0;
+                det_total_ms+=det_ms; if(det_ms>g_det_max_ms)g_det_max_ms=det_ms;
+                const double proc_ms=timing.detect_duration_us()/1000.0;
+                g_proc_total_ms+=proc_ms; if(proc_ms>g_proc_max_ms)g_proc_max_ms=proc_ms;
+                const double lat_ms=timing.capture_latency_us()/1000.0;
+                g_lat_total_ms+=lat_ms; if(lat_ms>g_lat_max_ms)g_lat_max_ms=lat_ms;
+                ++det_count;
                 if(green_frames%300==0){
                     printf("GREEN_STAT frames=%lu hits=%lu rate=%.1f%%\n",
                            green_frames,green_hits,100.0*green_hits/(green_frames?green_frames:1));
@@ -492,11 +656,30 @@ int main(int argc,char** argv){
         if(t-report>=5 && count>1){
             unsigned long enc=encoded.load(),sent=network_sent.load(),bytes=network_bytes.load();
             printf("capture_frames=%lu host_fps=%.4f pts_fps=%.4f duplicate_pts=%lu timeouts=%lu encoded=%lu encode_errors=%lu encode_fps=%.3f sent_fps=%.3f jpeg_mbit_s=%.3f preview_replaced=%lu\n",count,(count-1)/(last-first),lastpts>firstpts?(count-1)*1e6/(lastpts-firstpts):0,dups,timeouts,enc,errors.load(),(enc-last_encoded)/(t-report),(sent-last_sent)/(t-report),(bytes-last_bytes)*8e-6/(t-report),preview_replaced.load());
-            if(det_count){printf("DETECT avg_ms=%.3f calls=%lu stride=%d map_miss=%lu sample_ms=%.3f track_ms=%.3f ns=%d\n",det_total_ms/det_count,det_count,g_detect_stride,g_map_miss,samp_total_ms/det_count,track_total_ms/det_count,g_sample_steps);det_total_ms=0;det_count=0;samp_total_ms=0;track_total_ms=0;}
+            if(det_count){printf("DETECT avg_ms=%.3f max_ms=%.3f proc_avg_ms=%.3f proc_max_ms=%.3f lat_avg_ms=%.3f lat_max_ms=%.3f calls=%lu stride=%d map_miss=%lu sample_ms=%.3f track_ms=%.3f ns=%d cand_max=%d\n",det_total_ms/det_count,g_det_max_ms,g_proc_total_ms/det_count,g_proc_max_ms,g_lat_total_ms/det_count,g_lat_max_ms,det_count,g_detect_stride,g_map_miss,samp_total_ms/det_count,track_total_ms/det_count,g_sample_steps,g_max_candidates);det_total_ms=0;det_count=0;samp_total_ms=0;track_total_ms=0;g_det_max_ms=0;g_proc_total_ms=0;g_proc_max_ms=0;g_lat_total_ms=0;g_lat_max_ms=0;}
+            if(g_uart.running()){
+                const unsigned long us=g_uart.sent_frames();
+                printf("UART sent=%lu rate=%.2fHz errors=%lu\n",us,(us-g_uart_sent_prev)/(t-report),g_uart.send_errors());
+                g_uart_sent_prev=us;
+            }
+            {
+                // 帧时间戳：相机帧号、最近发布帧的年龄、串口发送时重算的端到端年龄
+                // （后者只做诊断，不写进 ASCII 的 age 字段）
+                const gt::SendAgeStats as=g_uart.take_send_age_stats();
+                const double cap_age_ms=g_last_pub_capture_us?static_cast<double>(gt::monotonic_us()-g_last_pub_capture_us)/1000.0:-1.0;
+                printf("TIMING last_frame_id=%u last_pub_frame_id=%u last_capture_age_ms=%.1f uart_age_last=%d uart_age_avg=%.2f uart_age_max=%d uart_age_n=%lu\n",
+                       g_capture_frame_id,g_last_pub_frame_id,cap_age_ms,as.last_ms,as.avg_ms,as.max_ms,as.samples);
+                // 原始 PTS 只记录：单位未实测确认前不做任何换算，只用于观察单调性/重复
+                const uint64_t win_delta=last_window_pts?(lastpts-last_window_pts):0;
+                printf("PTS_STAT last_raw=%llu window_delta_raw=%llu per_frame_raw=%.1f duplicate_pts=%lu\n",
+                       static_cast<unsigned long long>(lastpts),static_cast<unsigned long long>(win_delta),
+                       (count>last_frame_count)?static_cast<double>(win_delta)/static_cast<double>(count-last_frame_count):0.0,dups);
+            }
             double wfps=(count-last_frame_count)/(t-report);double wpts=(last_window_pts&&lastpts>last_window_pts)?(count-last_frame_count)*1000000.0/(lastpts-last_window_pts):0;printf("CLOCK36_WINDOW elapsed_s=%.2f frames=%lu host_fps=%.4f pts_fps=%.4f\n",t-start,count-last_frame_count,wfps,wpts);last_frame_count=count;last_window_pts=lastpts;last_encoded=enc;last_sent=sent;last_bytes=bytes;report=t;
         }
     }
     if(encoder_thread.joinable())encoder_thread.join();
+    g_uart.stop();   // 先停串口，避免退出过程中继续往 tty 写
     if(recording_enabled && !avi.finish())recording_failed=1;
     {std::lock_guard<std::mutex> guard(input_mutex);if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);has_pending=false;}}
     if(server_thread.joinable())server_thread.join();

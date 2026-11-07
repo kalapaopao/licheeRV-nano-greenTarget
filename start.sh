@@ -19,6 +19,19 @@ validate_auto_gain() {
     validate_integer "$key" "$value" 0 "$high"
     [ "$value" -eq 0 ] || [ "$value" -ge 1024 ] || config_error "$key must be 0 or at least 1024"
 }
+# 浮点校验：接受 -12.5 / 12.5 / .5 / 12 / -0.001；拒绝空串、纯符号、多个小数点。
+# 不支持科学计数法（本配置不需要）。范围校验由 camera 的 env_f32 兜底。
+validate_float() {
+    key=$1; value=$2
+    case "$value" in
+        '') config_error "$key must be a number";;
+        -*) rest=${value#-};;
+        *)  rest=$value;;
+    esac
+    case "$rest" in
+        ''|.|*[!0-9.]*|*.*.*) config_error "$key must be a number (got '$value')";;
+    esac
+}
 EXPOSURE_MODE=manual
 MANUAL_EXP_US=3000
 MANUAL_AGAIN=1024
@@ -42,6 +55,31 @@ DISPLAY_ENABLE=true
 DETECT_SAMPLE_STEPS=2
 DETECT_STRIDE=1
 DETECT_ENABLE=true
+# ---- 阶段1：目标跟踪 + 角度 + 串口（默认值与 camera.cpp 保持一致）----
+TRACK_ENABLE=true
+CAM_FX=1023.2
+CAM_FY=1022.2
+CAM_CX=643.8
+CAM_CY=382.8
+OPTICAL_YAW_DEG=0.0
+OPTICAL_PITCH_DEG=0.0
+CAM_INVERT_YAW=false
+CAM_INVERT_PITCH=false
+TARGET_DIAMETER_M=0.05
+SEL_CONF_WEIGHT=0.5
+SEL_MAX_ASPECT=1.5
+SEL_MAX_DIST_DEG=60.0
+SEL_MAX_CANDIDATES=8
+SEL_CONFIRM_FRAMES=5
+SEL_LOST_FRAMES=10
+KF_PROCESS_NOISE=50.0
+KF_MEASURE_NOISE=0.001
+KF_INIT_POS_VAR=10.0
+KF_INIT_VEL_VAR=2.0
+UART_ENABLE=false
+UART_DEVICE=/dev/ttyS1
+UART_BAUD=115200
+UART_RATE_HZ=50
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -79,6 +117,30 @@ while IFS= read -r line || [ -n "$line" ]; do
         detect_sample_steps) DETECT_SAMPLE_STEPS=$value;;
         detect_stride) DETECT_STRIDE=$value;;
         detect_enable) DETECT_ENABLE=$value;;
+        track_enable) TRACK_ENABLE=$value;;
+        cam_fx) CAM_FX=$value;;
+        cam_fy) CAM_FY=$value;;
+        cam_cx) CAM_CX=$value;;
+        cam_cy) CAM_CY=$value;;
+        optical_yaw_deg) OPTICAL_YAW_DEG=$value;;
+        optical_pitch_deg) OPTICAL_PITCH_DEG=$value;;
+        cam_invert_yaw) CAM_INVERT_YAW=$value;;
+        cam_invert_pitch) CAM_INVERT_PITCH=$value;;
+        target_diameter_m) TARGET_DIAMETER_M=$value;;
+        sel_conf_weight) SEL_CONF_WEIGHT=$value;;
+        sel_max_aspect) SEL_MAX_ASPECT=$value;;
+        sel_max_dist_deg) SEL_MAX_DIST_DEG=$value;;
+        sel_max_candidates) SEL_MAX_CANDIDATES=$value;;
+        sel_confirm_frames) SEL_CONFIRM_FRAMES=$value;;
+        sel_lost_frames) SEL_LOST_FRAMES=$value;;
+        kf_process_noise) KF_PROCESS_NOISE=$value;;
+        kf_measure_noise) KF_MEASURE_NOISE=$value;;
+        kf_init_pos_var) KF_INIT_POS_VAR=$value;;
+        kf_init_vel_var) KF_INIT_VEL_VAR=$value;;
+        uart_enable) UART_ENABLE=$value;;
+        uart_device) UART_DEVICE=$value;;
+        uart_baud) UART_BAUD=$value;;
+        uart_rate_hz) UART_RATE_HZ=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
@@ -91,6 +153,35 @@ validate_integer detect_sample_steps "$DETECT_SAMPLE_STEPS" 1 4
 validate_integer detect_stride "$DETECT_STRIDE" 1 10
 case "$DETECT_ENABLE" in true|false) ;; *) config_error 'detect_enable must be true or false';; esac
 case "$BLC_MODE" in manual|default) ;; *) config_error 'black_level_mode must be manual or default';; esac
+
+# ---- 阶段1：目标跟踪 / 标定 / 串口 校验 ----
+case "$TRACK_ENABLE" in true|false) ;; *) config_error 'track_enable must be true or false';; esac
+case "$CAM_INVERT_YAW" in true|false) ;; *) config_error 'cam_invert_yaw must be true or false';; esac
+case "$CAM_INVERT_PITCH" in true|false) ;; *) config_error 'cam_invert_pitch must be true or false';; esac
+case "$UART_ENABLE" in true|false) ;; *) config_error 'uart_enable must be true or false';; esac
+validate_float cam_fx "$CAM_FX"
+validate_float cam_fy "$CAM_FY"
+validate_float cam_cx "$CAM_CX"
+validate_float cam_cy "$CAM_CY"
+validate_float optical_yaw_deg "$OPTICAL_YAW_DEG"
+validate_float optical_pitch_deg "$OPTICAL_PITCH_DEG"
+validate_float target_diameter_m "$TARGET_DIAMETER_M"
+validate_float sel_conf_weight "$SEL_CONF_WEIGHT"
+validate_float sel_max_aspect "$SEL_MAX_ASPECT"
+validate_float sel_max_dist_deg "$SEL_MAX_DIST_DEG"
+validate_float kf_process_noise "$KF_PROCESS_NOISE"
+validate_float kf_measure_noise "$KF_MEASURE_NOISE"
+validate_float kf_init_pos_var "$KF_INIT_POS_VAR"
+validate_float kf_init_vel_var "$KF_INIT_VEL_VAR"
+validate_integer sel_max_candidates "$SEL_MAX_CANDIDATES" 1 32
+validate_integer sel_confirm_frames "$SEL_CONFIRM_FRAMES" 1 1000
+validate_integer sel_lost_frames "$SEL_LOST_FRAMES" 1 1000
+validate_integer uart_baud "$UART_BAUD" 1200 4000000
+validate_integer uart_rate_hz "$UART_RATE_HZ" 1 200
+case "$UART_DEVICE" in /dev/*) ;; *) config_error 'uart_device must start with /dev/';; esac
+# 串口开着却没有跟踪链路 = 没有内容可发，直接拒绝，避免联调时白等
+[ "$UART_ENABLE" = "true" ] && [ "$TRACK_ENABLE" != "true" ] && \
+    config_error 'uart_enable requires track_enable=true'
 validate_integer manual_exposure_us "$MANUAL_EXP_US" 100 10000
 validate_integer manual_analog_gain_x1024 "$MANUAL_AGAIN" 1024 16384
 validate_integer manual_digital_gain_x1024 "$MANUAL_DGAIN" 1024 4096
@@ -109,6 +200,7 @@ validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
     echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
+echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ"
     exit 0
 fi
 if [ "$DURATION" = '--recoding' ] || [ "$DURATION" = '--recording' ]; then
@@ -215,6 +307,31 @@ export DISPLAY_ENABLE="$DISPLAY_ENABLE"
 export DETECT_SAMPLE_STEPS="$DETECT_SAMPLE_STEPS"
 export DETECT_STRIDE="$DETECT_STRIDE"
 export DETECT_ENABLE="$DETECT_ENABLE"
+# ---- 阶段1：目标跟踪 / 标定 / 串口（camera.cpp 里严格校验范围）----
+export TRACK_ENABLE="$TRACK_ENABLE"
+export CAM_FX="$CAM_FX"
+export CAM_FY="$CAM_FY"
+export CAM_CX="$CAM_CX"
+export CAM_CY="$CAM_CY"
+export OPTICAL_YAW_DEG="$OPTICAL_YAW_DEG"
+export OPTICAL_PITCH_DEG="$OPTICAL_PITCH_DEG"
+export CAM_INVERT_YAW="$CAM_INVERT_YAW"
+export CAM_INVERT_PITCH="$CAM_INVERT_PITCH"
+export TARGET_DIAMETER_M="$TARGET_DIAMETER_M"
+export SEL_CONF_WEIGHT="$SEL_CONF_WEIGHT"
+export SEL_MAX_ASPECT="$SEL_MAX_ASPECT"
+export SEL_MAX_DIST_DEG="$SEL_MAX_DIST_DEG"
+export SEL_MAX_CANDIDATES="$SEL_MAX_CANDIDATES"
+export SEL_CONFIRM_FRAMES="$SEL_CONFIRM_FRAMES"
+export SEL_LOST_FRAMES="$SEL_LOST_FRAMES"
+export KF_PROCESS_NOISE="$KF_PROCESS_NOISE"
+export KF_MEASURE_NOISE="$KF_MEASURE_NOISE"
+export KF_INIT_POS_VAR="$KF_INIT_POS_VAR"
+export KF_INIT_VEL_VAR="$KF_INIT_VEL_VAR"
+export UART_ENABLE="$UART_ENABLE"
+export UART_DEVICE="$UART_DEVICE"
+export UART_BAUD="$UART_BAUD"
+export UART_RATE_HZ="$UART_RATE_HZ"
 if [ "$RECORDING" -eq 1 ]; then
     RECORD_DIR="$ROOT/recordings"
     mkdir -p "$RECORD_DIR"
