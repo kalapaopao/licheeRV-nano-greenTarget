@@ -1,24 +1,27 @@
-# 板端编译产物（RISC-V 可执行文件不入库）
-camera
+# 鏉跨缂栬瘧浜х墿锛圧ISC-V 鍙墽琛屾枃浠朵笉鍏ュ簱锛?camera
 build/
 build_host/
 *.o
 *.a
 
-# 录像与相机锁（运行期产生）
-recordings/
+# 褰曞儚涓庣浉鏈洪攣锛堣繍琛屾湡浜х敓锛?recordings/
 *.avi
 .camera.lock/
 
-# 运行日志
+# 杩愯鏃ュ織
 *.log
 
-# 回归测试的原始帧数据（体积大，按需从录像重新导出）
+# 鍥炲綊娴嬭瘯鐨勫師濮嬪抚鏁版嵁锛堜綋绉ぇ锛屾寜闇€浠庡綍鍍忛噸鏂板鍑猴級
 tests/*.i420
 
-# 编辑器/系统
+# 缂栬緫鍣?绯荤粺
 .vscode/
 .idea/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# draw.io 桌面版的备份/临时文件
+$*.bkp
+*.drawio.bkp
+~$*.drawio
