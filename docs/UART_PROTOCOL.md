@@ -117,8 +117,8 @@ age = -1        → 从未检测到
 > - `age`（协议字段）：这份角度数据离**最近一次真实检测**多久了 —— 电控用它判断
 >   「数据是否陈旧」。coast 期（state=1，角度是卡尔曼外推）它会持续增长，正是要
 >   让电控知道「越久越该收手」。
-> - `uart_age_*`（视觉侧日志，**不占协议字段**）：这一帧从「程序取到图像」到
->   「串口真正发出去」的板端延迟 —— 用来评估视觉链路自身的实时性，见第六节。
+> - `uart_write_start_age_*`（视觉侧日志，**不占协议字段**）：这一帧从「程序取到图像」到
+>   「**开始**往串口写」的板端延迟 —— 用来评估视觉链路自身的实时性，见第六节。
 
 ### 3.3 `v_yaw` / `v_pitch` 怎么用
 
@@ -191,24 +191,29 @@ body 最长约 50 字符（所有字段取最大宽度）→ 单帧约 60 字节
 |---|---|---|
 | `capture_frames= host_fps= pts_fps= duplicate_pts= timeouts=` | 采集帧率 / 按 PTS 推算的帧率 / 重复 PTS 次数 / 取帧超时次数 | 80fps 是否达成、PTS 是否单调 |
 | `DETECT avg_ms= max_ms= proc_avg_ms= proc_max_ms= lat_avg_ms= lat_max_ms= calls=` | `avg/max` = 抽样→发布整块；`proc` = 抽样→结果完成；`lat` = **取帧**→结果完成 | 视觉处理耗时与「取帧到出结果」的延迟 |
-| `TIMING last_frame_id= last_pub_frame_id= last_capture_age_ms= uart_age_last= uart_age_avg= uart_age_max= uart_age_n=` | 相机帧号 / 最近发布帧的年龄 / **串口发送时重算的「取帧→发送」年龄** | 结果是否还在更新；串口真正发出去的数据有多旧 |
-| `PTS_STAT last_raw= window_delta_raw= per_frame_raw= duplicate_pts=` | VI 原始 PTS、窗口内差值、每帧差值 | **只观测，不假设单位**：若单位是微秒，80fps 时 `per_frame_raw≈12500` |
+| `TIMING last_frame_id= last_pub_frame_id= last_capture_age_ms= uart_write_start_age_last= uart_write_start_age_avg= uart_write_start_age_max= uart_write_start_age_n=` | 相机帧号 / 最近发布帧的年龄 / **「取帧→开始写 UART」的板端年龄**（`write_start` 口径） | 结果是否还在更新；串口这一帧的数据有多旧 |
+| `PTS_STAT last_raw= window_delta_raw= per_frame_raw= duplicate_pts=` | VI 原始 PTS、窗口内差值、每帧差值 | 已实测为**微秒**（80fps 时 `per_frame_raw≈12500`），但代码仍只观测、不做任何换算 |
 | `UART sent= rate= errors=` | 发送帧率 / 写失败次数 | 串口链路是否健康 |
 | `GREEN_TARGET ... age=... frame=` | 协议里的 `age`、角度/角速度/距离、帧号 | 限频到 ≤10Hz，用于人工对照 |
 
 三条纪律：
 1. `GREEN_TARGET` 最多 10Hz（连续目标时不再每帧 printf），其余统计行每 5 秒一次；
-2. `age`（协议字段，数据陈旧度）与 `uart_age_*`（板端端到端延迟）**不是同一个量**，
+2. `age`（协议字段，数据陈旧度）与 `uart_write_start_age_*`（板端「写开始」年龄）**不是同一个量**，
    前者发给电控，后者只进日志；
 3. `frame_id` 是相机帧号（每取到一帧 +1），`seq` 是结果序号（跟踪器每次更新 +1），
    两者不能互相替代。
+
+> **口径说明（避免误读）**：`uart_write_start_age_*` 的采样点在 `write_all()` **之前**，
+> 表示「取帧 → 开始写串口」，**不含** write 阻塞时间。115200 下 60 字节通常在内核缓冲里
+> 立即返回（<0.1ms），只有缓冲满是 `write_all` 会重试（上限约 2ms）。若将来需要「写完」的
+> 年龄，应另立 `uart_write_complete_age_*` 并把采样移到 `write_all()` 之后，不要与现有字段混用。
 
 > **2026-11-08 板端实测（1280×720 / 80fps / `detect_stride=1`）**：
 > `per_frame_raw` 稳定在 12500±130，`window_delta_raw` 约 5,000,000/5s，
 > `duplicate_pts=0` → **`u64PTS` 单位是微秒**且单调递增。代码仍然只记录、
 > 不把 PTS 参与任何计算（换传感器或换驱动后需重新确认）。
 > 同一次实测：`proc_avg_ms≈5.1`、`lat_avg_ms≈5.1`（display 关闭时），
-> `uart_age_avg≈11.5ms`（50Hz 发送 + 80Hz 出结果，平均要等半个帧周期）。
+> `uart_write_start_age_avg≈11.5ms`（50Hz 发送 + 80Hz 出结果，平均要等半个帧周期）。
 
 ---
 

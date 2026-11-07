@@ -37,8 +37,8 @@ static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
 static bool g_draw_test_box=false;
 static unsigned long g_uart_sent_prev=0;
 // ---- 帧时间戳（见 frame_timing.h）：帧号 + 采集时刻 + 原始 PTS ----
-// capture_mono_us 是「程序拿到帧」的时刻，不是曝光时刻；u64PTS 单位未实测确认，
-// 只记录和统计，不参与任何计算。
+// capture_mono_us 是「程序拿到帧」的时刻，不是曝光时刻；u64PTS 板端实测单位是微秒
+// （1280x720/80fps 时每帧差≈12500），但仍只记录、不参与任何计算。
 static uint32_t g_capture_frame_id=0;          // 相机帧号：每成功取到一帧 +1
 static gt::MonoUs g_last_track_capture_us=0;   // 上次真正跑 Tracker 那帧的采集时刻（dt 基准）
 static gt::MonoUs g_last_pub_capture_us=0;     // 最近一次发布给串口那帧的采集时刻
@@ -663,13 +663,16 @@ int main(int argc,char** argv){
                 g_uart_sent_prev=us;
             }
             {
-                // 帧时间戳：相机帧号、最近发布帧的年龄、串口发送时重算的端到端年龄
+                // 帧时间戳：相机帧号、最近发布帧的年龄、串口「取帧→开始写」年龄
                 // （后者只做诊断，不写进 ASCII 的 age 字段）
-                const gt::SendAgeStats as=g_uart.take_send_age_stats();
+                const gt::WriteStartAgeStats as=g_uart.take_write_start_age_stats();
                 const double cap_age_ms=g_last_pub_capture_us?static_cast<double>(gt::monotonic_us()-g_last_pub_capture_us)/1000.0:-1.0;
-                printf("TIMING last_frame_id=%u last_pub_frame_id=%u last_capture_age_ms=%.1f uart_age_last=%d uart_age_avg=%.2f uart_age_max=%d uart_age_n=%lu\n",
+                printf("TIMING last_frame_id=%u last_pub_frame_id=%u last_capture_age_ms=%.1f "
+                       "uart_write_start_age_last=%d uart_write_start_age_avg=%.2f "
+                       "uart_write_start_age_max=%d uart_write_start_age_n=%lu\n",
                        g_capture_frame_id,g_last_pub_frame_id,cap_age_ms,as.last_ms,as.avg_ms,as.max_ms,as.samples);
-                // 原始 PTS 只记录：单位未实测确认前不做任何换算，只用于观察单调性/重复
+                // 原始 PTS 只记录：板端实测单位是微秒（80fps 时每帧差≈12500），但代码不做换算，
+                // 只用于观察单调性/重复；换传感器或驱动后需重新确认。
                 const uint64_t win_delta=last_window_pts?(lastpts-last_window_pts):0;
                 printf("PTS_STAT last_raw=%llu window_delta_raw=%llu per_frame_raw=%.1f duplicate_pts=%lu\n",
                        static_cast<unsigned long long>(lastpts),static_cast<unsigned long long>(win_delta),

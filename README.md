@@ -97,9 +97,9 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 
 | 项 | 实现 |
 |---|---|
-| 帧号 / 采集时刻 / PTS | `CVI_VI_GetChnFrame()` 成功后立刻记录；`u64PTS` 只记录不换算（单位未实测确认） |
+| 帧号 / 采集时刻 / PTS | `CVI_VI_GetChnFrame()` 成功后立刻记录；`u64PTS` 只记录不换算（板端实测为微秒，80fps 时每帧差≈12500） |
 | 跟踪 dt | 用**采集时刻差**（不再用检测后的 `now()` 差），抽样/检测/日志/调度抖动不再混进卡尔曼；`detect_stride>1` 时 dt 自然等于跨帧采集间隔 |
-| 串口年龄 | 发送线程按快照重算「取帧→发送」年龄，**只写日志**（`uart_age_*`），ASCII 字段数量与顺序不变 |
+| 串口年龄 | 发送线程按快照重算「取帧→**开始**写串口」年龄，**只写日志**（`uart_write_start_age_*`），ASCII 字段数量与顺序不变 |
 | 日志限频 | `GREEN_TARGET` ≤10Hz（原来连续目标时 80Hz）；`DETECT`/`TIMING`/`PTS_STAT`/`UART` 每 5 秒 |
 | 新增统计 | `proc_ms`（抽样→结果）、`lat_ms`（取帧→结果）、`last_frame_id`、`last_capture_age_ms`、原始 PTS 差值 |
 
@@ -108,7 +108,7 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 [docs/UART_PROTOCOL.md](docs/UART_PROTOCOL.md) 第二节、第三节与第六节。
 
 板端实测（2026-11-08，80fps，`display_enable=false`）：`proc_avg≈5.1ms`、`lat_avg≈5.1ms`、
-`uart_age_avg≈11.5ms`（50Hz 发送 vs 80Hz 出结果）；`PTS_STAT` 每帧差值≈12500 →
+`uart_write_start_age_avg≈11.5ms`（50Hz 发送 vs 80Hz 出结果）；`PTS_STAT` 每帧差值≈12500 →
 **`u64PTS` 单位是微秒**（代码仍只记录、不参与计算）。
 
 ### 板端实测（1280×720，无目标场景）

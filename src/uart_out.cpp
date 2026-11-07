@@ -173,34 +173,34 @@ void UartOut::set_snapshot(const TargetOut& out, const FrameTiming* timing) {
   has_latest_ = true;
 }
 
-// 记录一次「取帧→发送」年龄样本（无效样本 age_us<0 只更新 last，不参与统计）
-void UartOut::add_send_age(int64_t age_us) {
+// 记录一次「取帧→开始写 UART」年龄样本（无效样本 age_us<0 只更新 last，不参与统计）
+void UartOut::add_write_start_age(int64_t age_us) {
   const int age_ms = age_us < 0 ? -1 : static_cast<int>(age_us / 1000);
-  std::lock_guard<std::mutex> g(age_mu_);
-  age_last_ms_ = age_ms;
+  std::lock_guard<std::mutex> g(write_age_mu_);
+  write_age_last_ms_ = age_ms;
   if (age_us < 0) {
     return;
   }
-  ++age_samples_;
-  age_sum_us_ += age_us;
-  if (age_ms > age_max_ms_) {
-    age_max_ms_ = age_ms;
+  ++write_age_samples_;
+  write_age_sum_us_ += age_us;
+  if (age_ms > write_age_max_ms_) {
+    write_age_max_ms_ = age_ms;
   }
 }
 
-SendAgeStats UartOut::take_send_age_stats() {
-  SendAgeStats s;
-  std::lock_guard<std::mutex> g(age_mu_);
-  s.samples = age_samples_;
-  s.last_ms = age_last_ms_;
-  s.max_ms = age_max_ms_;
-  if (age_samples_ > 0) {
-    s.avg_ms = static_cast<double>(age_sum_us_) / 1000.0 /
-               static_cast<double>(age_samples_);
+WriteStartAgeStats UartOut::take_write_start_age_stats() {
+  WriteStartAgeStats s;
+  std::lock_guard<std::mutex> g(write_age_mu_);
+  s.samples = write_age_samples_;
+  s.last_ms = write_age_last_ms_;
+  s.max_ms = write_age_max_ms_;
+  if (write_age_samples_ > 0) {
+    s.avg_ms = static_cast<double>(write_age_sum_us_) / 1000.0 /
+               static_cast<double>(write_age_samples_);
   }
-  age_samples_ = 0;
-  age_sum_us_ = 0;
-  age_max_ms_ = -1;
+  write_age_samples_ = 0;
+  write_age_sum_us_ = 0;
+  write_age_max_ms_ = -1;
   return s;
 }
 
@@ -249,11 +249,13 @@ void UartOut::thread_main() {
     }
 
     if (has) {
-      // 发送时刻重新计算「取帧→发送」板端年龄。这是结果真实的端到端年龄，
-      // 与 TargetOut::age_ms（跟踪器内部的数据陈旧度）是两个不同的量：
-      // 后者进 ASCII 的 age 字段（语义不变），前者只进诊断日志。
-      const MonoUs send_us = monotonic_us();
-      add_send_age(frame_age_us(snapshot.has_timing, snapshot.timing.capture_mono_us, send_us));
+      // 采样点在 write_all() 之前，所以这里得到的是「取帧→**开始写** UART」的年龄
+      // （日志字段名带 write_start，避免被误读成写完成）。它与 TargetOut::age_ms
+      // （跟踪器内部的数据陈旧度）是两个不同的量：后者进 ASCII 的 age 字段（语义不变），
+      // 前者只进诊断日志。
+      const MonoUs write_start_us = monotonic_us();
+      add_write_start_age(
+          frame_age_us(snapshot.has_timing, snapshot.timing.capture_mono_us, write_start_us));
 
       const int len = format_ascii(snapshot.target, frame, sizeof(frame));
       if (len > 0) {

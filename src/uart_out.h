@@ -44,8 +44,11 @@ struct UartSnapshot {
   bool has_timing = false;   // false = 没有可用时间戳（例如启动时那一帧）
 };
 
-// 发送时「取帧→发送」板端年龄的统计（诊断用，不进入 ASCII 协议字段）
-struct SendAgeStats {
+// 「取帧 → 开始写 UART」的板端年龄统计（诊断用，不进入 ASCII 协议字段）。
+// 口径：采样点在 write_all() **之前**，所以是「写开始」而不是「写完成」。
+// 115200 下 60 字节通常在内核缓冲里立即返回（<0.1ms），缓冲满时 write_all 最多重试约 2ms；
+// 若将来需要「写完成」口径，应改名并移动到 write_all() 返回之后，不要复用本字段。
+struct WriteStartAgeStats {
   unsigned long samples = 0;   // 本统计窗口内的有效样本数
   int last_ms = -1;            // 最近一次发送时的年龄；-1 = 无有效时间戳
   int max_ms = -1;             // 本窗口内最大年龄
@@ -76,7 +79,7 @@ class UartOut {
 
   // 主线程每帧调用：只做一次结构体拷贝 + 唤醒发送线程
   void publish(const TargetOut& out);
-  // 带采集时间戳的重载：串口线程发送时会重算「取帧→发送」年龄（诊断日志用）
+  // 带采集时间戳的重载：串口线程会在写之前重算「取帧→开始写 UART」年龄（仅诊断日志）
   void publish(const TargetOut& out, const FrameTiming& timing);
 
   // 诊断计数
@@ -85,12 +88,12 @@ class UartOut {
   bool running() const { return running_.load(); }
   std::string last_error() const;
 
-  // 读取并清零本统计窗口的发送年龄统计（由串口线程写入，5 秒日志调用一次）
-  SendAgeStats take_send_age_stats();
+  // 读取并清零本统计窗口的「取帧→开始写 UART」年龄统计（串口线程写入，5 秒日志调用一次）
+  WriteStartAgeStats take_write_start_age_stats();
 
  private:
   void set_snapshot(const TargetOut& out, const FrameTiming* timing);
-  void add_send_age(int64_t age_us);
+  void add_write_start_age(int64_t age_us);
   void thread_main();
   bool open_device();
   void close_device();
@@ -108,12 +111,12 @@ class UartOut {
   bool has_latest_ = false;
   unsigned long published_seq_ = 0;
 
-  // 「取帧→发送」年龄统计（只保留计数，不建历史队列）
-  std::mutex age_mu_;
-  unsigned long age_samples_ = 0;
-  int64_t age_sum_us_ = 0;
-  int age_last_ms_ = -1;
-  int age_max_ms_ = -1;
+  // 「取帧→开始写 UART」年龄统计（只保留计数，不建历史队列）
+  std::mutex write_age_mu_;
+  unsigned long write_age_samples_ = 0;
+  int64_t write_age_sum_us_ = 0;
+  int write_age_last_ms_ = -1;
+  int write_age_max_ms_ = -1;
 
   std::atomic<unsigned long> sent_frames_{0};
   std::atomic<unsigned long> send_errors_{0};
