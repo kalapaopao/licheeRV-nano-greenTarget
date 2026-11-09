@@ -66,6 +66,7 @@ OPTICAL_PITCH_DEG=0.0
 CAM_INVERT_YAW=false
 CAM_INVERT_PITCH=false
 TARGET_DIAMETER_M=0.05
+TARGET_UP_OFFSET_FACTOR=1.5
 SEL_CONF_WEIGHT=0.5
 SEL_MAX_ASPECT=1.5
 SEL_MAX_DIST_DEG=60.0
@@ -127,6 +128,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         cam_invert_yaw) CAM_INVERT_YAW=$value;;
         cam_invert_pitch) CAM_INVERT_PITCH=$value;;
         target_diameter_m) TARGET_DIAMETER_M=$value;;
+        target_up_offset_factor) TARGET_UP_OFFSET_FACTOR=$value;;
         sel_conf_weight) SEL_CONF_WEIGHT=$value;;
         sel_max_aspect) SEL_MAX_ASPECT=$value;;
         sel_max_dist_deg) SEL_MAX_DIST_DEG=$value;;
@@ -166,6 +168,7 @@ validate_float cam_cy "$CAM_CY"
 validate_float optical_yaw_deg "$OPTICAL_YAW_DEG"
 validate_float optical_pitch_deg "$OPTICAL_PITCH_DEG"
 validate_float target_diameter_m "$TARGET_DIAMETER_M"
+validate_float target_up_offset_factor "$TARGET_UP_OFFSET_FACTOR"
 validate_float sel_conf_weight "$SEL_CONF_WEIGHT"
 validate_float sel_max_aspect "$SEL_MAX_ASPECT"
 validate_float sel_max_dist_deg "$SEL_MAX_DIST_DEG"
@@ -200,7 +203,7 @@ validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
     echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
-echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ"
+echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ"
     exit 0
 fi
 if [ "$DURATION" = '--recoding' ] || [ "$DURATION" = '--recording' ]; then
@@ -318,6 +321,7 @@ export OPTICAL_PITCH_DEG="$OPTICAL_PITCH_DEG"
 export CAM_INVERT_YAW="$CAM_INVERT_YAW"
 export CAM_INVERT_PITCH="$CAM_INVERT_PITCH"
 export TARGET_DIAMETER_M="$TARGET_DIAMETER_M"
+export TARGET_UP_OFFSET_FACTOR="$TARGET_UP_OFFSET_FACTOR"
 export SEL_CONF_WEIGHT="$SEL_CONF_WEIGHT"
 export SEL_MAX_ASPECT="$SEL_MAX_ASPECT"
 export SEL_MAX_DIST_DEG="$SEL_MAX_DIST_DEG"

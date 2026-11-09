@@ -241,5 +241,33 @@ rm -rf ~/sipeed_sdk
 | 文档 | 内容 |
 |---|---|
 | `docs/HANDOFF_ISSUE_720p_80fps.md` | 720P/80fps 卡点的完整取证与提问清单 |
-| `docs/architecture/` | 5 页架构图（总体/逐帧/算法/启动/诊断树） |
+| `docs/architecture/` | 4 页代码级图示（总览/主线程/帧所有权/线程同步）+ 对应 `.drawio` 源文件 |
+| `docs/UART_PROTOCOL.md` | 视觉→电控串口协议（含字节级自检工具用法，见其 §八） |
 | `README.md` | 项目功能、编译、运行、已知限制 |
+
+---
+
+## 九、本机环境已知坑（踩过一次，别再踩）
+
+### 9.1 `build.sh` 的默认 SDK 路径是错的（**未修，用 `env/verify_build.sh` 代替**）
+
+- `build.sh:23` 默认 `CVI_SDK_ROOT=/mnt/e/study/LicheeRV/env/sipeed-sdk/middleware/v2`，
+  但 `build.sh:25` 校验的是 `$CVI_SDK_ROOT/middleware/include`，该路径不存在 →
+  直接 `wsl -e bash build.sh` 会打印「缺少平台 SDK」并退出。
+- 本机可用的是 `E:\study\LicheeRV\env\sipeed-sdk-build`（`include/` + `kernel_include/` + `lib/` + `lib_dyn/`），
+  与 `CMakeLists.txt` 的默认 `SDK_ROOT` 一致。**交叉编译请用**：
+  ```powershell
+  wsl -e bash /mnt/e/study/LicheeRV/env/verify_build.sh
+  ```
+- 建议修法（未执行）：把 `build.sh` 默认 `CVI_SDK_ROOT` 改成 `.../env/sipeed-sdk-build`，
+  校验改成 `[ -d "$CVI_SDK_ROOT/include" ]`；`README.md` 的编译命令也应指向 `verify_build.sh`。
+
+### 9.2 WSL 的 `/tmp` 在多次 `wsl.exe` 调用之间会被清空
+
+WSL 实例会因空闲重启，放在 `/tmp` 的中间产物（基线副本、测试二进制）会消失。
+**重要中间产物放 Windows 侧**（如 `%TEMP%`），或每次重新生成。
+
+### 9.3 PowerShell 5.1 的 `Get-Content` 对本仓库部分文件计数不准
+
+`Get-Content README.md` 报 149 行，实际 220 行。统计行数用 `.NET ReadAllText` 或 `wc -l`，
+不要用 PS 5.1 的 `Get-Content` 做行数判断。

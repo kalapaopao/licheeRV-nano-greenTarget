@@ -13,6 +13,13 @@ inline float clampf(float v, float lo, float hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// 瞄准点（检测网格坐标）：引导灯中心上方 factor × 像素直径。
+// 说明：像素直径 = 2*radius*S，而 gridToAngleDeg 内部会再乘 S，
+//       所以这里用网格单位 2*radius 即可，等价于像素上移 factor*2*radius*S。
+inline float aim_grid_y(const CameraCalib& c, const greendet::Blob& b) {
+  return b.cy - c.aim_up_offset_factor * 2.0f * b.radius;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -180,7 +187,7 @@ const TargetOut& TargetTracker::update(const greendet::Blob* cands, int n, int g
       // 关卡 3：离预测位置越近，得分越高（这是「锁定」的真正机制）
       if (tracking) {
         float yaw = 0.0f, pitch = 0.0f;
-        calib_.gridToAngleDeg(b.cx, b.cy, grid_S, &yaw, &pitch);
+        calib_.gridToAngleDeg(b.cx, aim_grid_y(calib_, b), grid_S, &yaw, &pitch);
         const float dy = yaw - pred_yaw;
         const float dp = pitch - pred_pitch;
         const float dist = std::sqrt(dy * dy + dp * dp);
@@ -191,7 +198,7 @@ const TargetOut& TargetTracker::update(const greendet::Blob* cands, int n, int g
       if (score > best_score) {
         best_score = score;
         best_idx = i;
-        calib_.gridToAngleDeg(b.cx, b.cy, grid_S, &best_yaw, &best_pitch);
+        calib_.gridToAngleDeg(b.cx, aim_grid_y(calib_, b), grid_S, &best_yaw, &best_pitch);
       }
     }
   }
@@ -219,6 +226,9 @@ const TargetOut& TargetTracker::update(const greendet::Blob* cands, int n, int g
     out_.pitch_deg = kf_pitch_.pos();
     out_.v_yaw_dps = kf_yaw_.vel();   // vel 已是「度/秒」（predict 里乘过 dt）
     out_.v_pitch_dps = kf_pitch_.vel();
+    // 引导灯中心角度（未加瞄准偏移），只用于联调日志对照：
+    // yaw/pitch 是「瞄准点」（装甲板），这两个是「灯中心」。
+    calib_.gridToAngleDeg(b.cx, b.cy, grid_S, &out_.light_yaw_deg, &out_.light_pitch_deg);
 
     out_.has_box = true;
     out_.gx = b.cx;

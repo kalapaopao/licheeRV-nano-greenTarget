@@ -1,5 +1,19 @@
 # 相机标定与参数填写指南
 
+## 当前 GC4653 标定入口
+
+本项目的 GC4653 标定使用主机侧工具，通过板端已有的
+http://10.133.124.1:8081/snapshot.jpg 获取图片：
+
+~~~powershell
+python tools/gc4653_calibration.py --calib
+~~~
+
+详细按键、离线模式和写回配置步骤见 tools/GC4653_CALIBRATION.md。
+
+third_party/hik_calibration 是面向海康 MVS USB 工业相机的独立参考项目，
+不参与 LicheeRV/GC4653 的板端编译。
+
 > 这份文档解决一件事：**`config.yaml` 里那几个标定参数该填什么、怎么来、怎么验证对不对。**
 >
 > 当前 `config.yaml` 里填的是**占位值**（从同型号 1280×720 相机估算），

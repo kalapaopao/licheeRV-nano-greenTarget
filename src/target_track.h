@@ -32,6 +32,12 @@ struct CameraCalib {
   bool invert_yaw = false;
   bool invert_pitch = false;
 
+  // 瞄准点向上偏移系数（抄自 HERO dart_vision_26 的 TARGET_UP_OFFSET_HEIGHT_FACTOR=1.5）：
+  //   瞄准点 = 目标中心上方 (factor × 目标像素直径)。
+  //   物理含义 = (装甲板中心到引导灯中心的距离) / (灯直径)，所以与距离无关、自动按框高缩放。
+  //   0 = 直接打灯中心；1.5 = 打灯中心上方 1.5 个灯直径处（装甲板）。
+  float aim_up_offset_factor = 0.0f;
+
   bool has_intrinsics() const { return fx > 1.0f && fy > 1.0f; }
 
   // 检测网格坐标 → 角度（度）。
@@ -76,10 +82,14 @@ struct TargetOut {
   bool detected = false;         // 本帧是否对外报「有目标」
   TargetState state = TargetState::kLost;
 
-  float yaw_deg = 0.0f;          // 目标相对光轴的水平角（正=右）
-  float pitch_deg = 0.0f;        // 目标相对光轴的俯仰角（正=上）
+  float yaw_deg = 0.0f;          // 目标相对光轴的水平角（正=右）——已加瞄准点偏移
+  float pitch_deg = 0.0f;        // 目标相对光轴的俯仰角（正=上）——已加瞄准点偏移
   float v_yaw_dps = 0.0f;        // 水平角速度（度/秒），给电控做前馈
   float v_pitch_dps = 0.0f;      // 俯仰角速度（度/秒）
+
+  // 引导灯中心的角度（未加瞄准点偏移），只用于联调对照日志
+  float light_yaw_deg = 0.0f;
+  float light_pitch_deg = 0.0f;
 
   float distance_m = 0.0f;       // 单目测距（需 target_diameter_m 已知）
   bool distance_valid = false;

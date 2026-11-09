@@ -263,6 +263,7 @@ int main(int argc,char** argv){
     bool track_on=true, uart_on=false, inv_yaw=false, inv_pitch=false;
     float cam_fx=1024.0f, cam_fy=1024.0f, cam_cx=640.0f, cam_cy=360.0f;
     float opt_yaw=0.0f, opt_pitch=0.0f, target_dia=0.05f;
+    float aim_up=1.5f;   // 瞄准点向上偏移系数（= 装甲板中心到灯中心距离 / 灯直径），抄 HERO 的 1.5
     float sel_conf=0.5f, sel_aspect=1.5f, sel_maxdist=60.0f;
     float kf_q=50.0f, kf_r=0.001f, kf_initpos=10.0f, kf_initvel=2.0f;
     unsigned sel_confirm=5, sel_lost=10, sel_maxcand=8;
@@ -281,6 +282,7 @@ int main(int argc,char** argv){
         env_f32("OPTICAL_YAW_DEG",0.0f,-90.0f,90.0f,opt_yaw) &&
         env_f32("OPTICAL_PITCH_DEG",0.0f,-90.0f,90.0f,opt_pitch) &&
         env_f32("TARGET_DIAMETER_M",0.05f,0.001f,10.0f,target_dia) &&
+        env_f32("TARGET_UP_OFFSET_FACTOR",1.5f,0.0f,5.0f,aim_up) &&
         env_f32("SEL_CONF_WEIGHT",0.5f,0.0f,1.0f,sel_conf) &&
         env_f32("SEL_MAX_ASPECT",1.5f,1.0f,10.0f,sel_aspect) &&
         env_f32("SEL_MAX_DIST_DEG",60.0f,1.0f,180.0f,sel_maxdist) &&
@@ -302,6 +304,8 @@ int main(int argc,char** argv){
         calib.fx=cam_fx; calib.fy=cam_fy; calib.cx=cam_cx; calib.cy=cam_cy;
         calib.optical_yaw_deg=opt_yaw; calib.optical_pitch_deg=opt_pitch;
         calib.invert_yaw=inv_yaw; calib.invert_pitch=inv_pitch;
+        // 瞄准点向上偏移：瞄准点 = 灯中心上方 aim_up × 灯直径（打装甲板，不是打灯）
+        calib.aim_up_offset_factor=aim_up;
         gt::KalmanCfg kf;
         kf.process_noise=kf_q; kf.measure_noise=kf_r;
         kf.init_pos_var=kf_initpos; kf.init_vel_var=kf_initvel;
@@ -313,9 +317,9 @@ int main(int argc,char** argv){
         sel.max_dist_deg=sel_maxdist;
         g_target.configure(calib,kf,sel,target_dia);
         printf("TRACK calib fx=%.2f fy=%.2f cx=%.2f cy=%.2f opt=%.2f/%.2f inv=%d/%d "
-               "confirm=%u lost=%u conf_w=%.2f aspect=%.2f dia=%.3fm\n",
+               "confirm=%u lost=%u conf_w=%.2f aspect=%.2f dia=%.3fm aimup=%.2f\n",
                cam_fx,cam_fy,cam_cx,cam_cy,opt_yaw,opt_pitch,(int)inv_yaw,(int)inv_pitch,
-               sel_confirm,sel_lost,sel_conf,sel_aspect,target_dia);
+               sel_confirm,sel_lost,sel_conf,sel_aspect,target_dia,aim_up);
     }
 
     if(uart_on && !track_on){
@@ -620,11 +624,13 @@ int main(int argc,char** argv){
                     if(log_now-g_last_target_log_us>=100000){
                         g_last_target_log_us=log_now;
                         printf("GREEN_TARGET state=%s yaw=%.2f pitch=%.2f vyaw=%.2f vpitch=%.2f "
-                               "dist=%.3f%s age=%.1fms cand=%d px=%.1f,%.1f r=%.1f hits=%lu frame=%u\n",
+                               "dist=%.3f%s age=%.1fms cand=%d px=%.1f,%.1f r=%.1f "
+                               "lyaw=%.2f lpitch=%.2f hits=%lu frame=%u\n",
                                target_state_name(tgt.state),tgt.yaw_deg,tgt.pitch_deg,
                                tgt.v_yaw_dps,tgt.v_pitch_dps,tgt.distance_m,
                                tgt.distance_valid?"":"(invalid)",tgt.age_ms,tgt.candidates,
-                               tgt.gx*S,tgt.gy*S,tgt.gr*S,green_hits,timing.frame_id);
+                               tgt.gx*S,tgt.gy*S,tgt.gr*S,tgt.light_yaw_deg,tgt.light_pitch_deg,
+                               green_hits,timing.frame_id);
                     }
                 }
                 // 无论有没有目标都发布：电控需要区分「视觉在线但没看到」和「视觉掉线」

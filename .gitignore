@@ -25,3 +25,6 @@ desktop.ini
 $*.bkp
 *.drawio.bkp
 ~$*.drawio
+
+# 第三方参考项目（各自独立 git 仓库，不参与本工程编译）
+third_party/

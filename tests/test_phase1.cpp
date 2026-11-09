@@ -373,6 +373,72 @@ static void test_frame_timing() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 7. 瞄准点向上偏移（打绿灯上方的装甲板，抄 HERO 的 TARGET_UP_OFFSET_HEIGHT_FACTOR=1.5）
+//    几何：瞄准点 = 灯中心上方 factor × 像素直径；像素直径 = 2*radius*S。
+//    本例 S=4、radius=8 → 直径 64px；factor=1.5 → 上移 96px。
+// ---------------------------------------------------------------------------
+static void test_aim_offset() {
+  printf("\n[7] 瞄准点向上偏移（灯 → 装甲板）\n");
+  gt::KalmanCfg kf;
+  gt::SelectCfg sel;
+  sel.confirm_frames = 1;
+  sel.lost_frames = 3;
+  const int S = 4;
+  greendet::Blob b;
+  b.cx = 160.0f; b.cy = 90.0f; b.radius = 8.0f;   // 网格中心（对应像素 640,360）
+  b.val = 200.0f; b.sat = 60.0f; b.aspect = 1.0f; b.fill = 0.8f;
+
+  // 7.1 factor=0：等价于原来的"打灯中心"
+  {
+    gt::CameraCalib c;
+    c.fx = 1000.0f; c.fy = 1000.0f; c.cx = 640.0f; c.cy = 360.0f;
+    c.aim_up_offset_factor = 0.0f;
+    gt::TargetTracker tr;
+    tr.configure(c, kf, sel, 0.05f);
+    tr.update(&b, 1, S, 0.0125f, 0.0);
+    check_near(tr.output().pitch_deg, 0.0f, 0.01f, "offset=0：灯在光轴中心 → pitch=0");
+    check_near(tr.output().light_pitch_deg, 0.0f, 0.01f, "offset=0：灯中心角度=0");
+  }
+
+  // 7.2 factor=1.5：瞄准点上移 1.5×64=96px → pitch = +atan(96/1000) = 5.486°
+  {
+    gt::CameraCalib c;
+    c.fx = 1000.0f; c.fy = 1000.0f; c.cx = 640.0f; c.cy = 360.0f;
+    c.aim_up_offset_factor = 1.5f;
+    gt::TargetTracker tr;
+    tr.configure(c, kf, sel, 0.05f);
+    tr.update(&b, 1, S, 0.0125f, 0.0);
+    check_near(tr.output().pitch_deg, 5.486f, 0.05f,
+               "offset=1.5：瞄准点=灯上方 1.5 个灯直径 → pitch≈+5.49°");
+    check_near(tr.output().light_pitch_deg, 0.0f, 0.01f, "灯中心角度仍为 0（仅日志对照用）");
+    check_near(tr.output().yaw_deg, 0.0f, 0.01f, "水平角不受垂直偏移影响");
+    char buf[128];
+    snprintf(buf, sizeof(buf), "pitch=%.3f light_pitch=%.3f", tr.output().pitch_deg,
+             tr.output().light_pitch_deg);
+    check(tr.output().pitch_deg > tr.output().light_pitch_deg, "瞄准角高于灯中心角", buf);
+    check(tr.output().distance_valid, "距离仍用灯直径计算（与偏移无关）");
+    snprintf(buf, sizeof(buf), "dist=%.3f", tr.output().distance_m);
+    check(tr.output().distance_m > 0.75f && tr.output().distance_m < 0.82f,
+          "斜距 ≈0.785m（z=0.781 + 瞄准点抬高）", buf);
+  }
+
+  // 7.3 偏移与距离无关：灯变小（更远）时，偏移角按"框高比例"自动缩放
+  {
+    gt::CameraCalib c;
+    c.fx = 1000.0f; c.fy = 1000.0f; c.cx = 640.0f; c.cy = 360.0f;
+    c.aim_up_offset_factor = 1.5f;
+    gt::TargetTracker tr;
+    tr.configure(c, kf, sel, 0.05f);
+    greendet::Blob far_b = b;
+    far_b.radius = 4.0f;                    // 半径减半 = 距离翻倍
+    tr.update(&far_b, 1, S, 0.0125f, 0.0);
+    // 直径 32px → 偏移 48px → pitch = atan(48/1000) = 2.748°
+    check_near(tr.output().pitch_deg, 2.748f, 0.05f,
+               "灯变小一半：偏移角也减半（≈+2.75°），说明按框高缩放正确");
+  }
+}
+
 int main() {
   printf("=== 阶段1 算法单元测试 ===\n");
   test_angles();
@@ -381,6 +447,7 @@ int main() {
   test_multi_target();
   test_aspect_filter();
   test_frame_timing();
+  test_aim_offset();
   printf("\n=== 结果：%d 通过, %d 失败 ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

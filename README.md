@@ -91,6 +91,18 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 | 单目测距 | `距离 = f × 目标直径 / 像素直径`，含横向斜距修正 |
 | 串口输出 | 独立线程，固定 50Hz，ASCII + XOR 校验，**无目标也发心跳** |
 
+### 瞄准点偏移（打装甲板，不是打绿灯中心）
+
+比赛里真正要打的是**绿灯上方装甲板的中心**。做法抄自 HERO `dart_vision_26`：
+**瞄准点 = 灯中心上方 `factor × 灯直径`**，`factor` 由 `config.yaml` 的
+`target_up_offset_factor` 控制（默认 1.5，与 HERO 的 `TARGET_UP_OFFSET_HEIGHT_FACTOR` 一致）。
+
+- 因为偏移量按"检测框高度"缩放，所以**与距离无关**，远近都自动对；
+- 物理含义：`factor = 装甲板中心到灯中心的距离 / 灯直径`（HERO：1.5 × 0.055m ≈ 82.5mm）；
+- `factor = 0` 就是原来的"打灯中心"；联调时按实际弹着点微调（0.0~5.0）；
+- 串口/日志里的 `yaw/pitch` 是**瞄准点**角度；日志另打 `lyaw/lpitch` 是**灯中心**角度，用于对照；
+- 测距仍用灯的像素直径（`target_diameter_m`），与偏移无关。
+
 ### 时间戳与延迟观测（阶段1.1）
 
 取帧处建立帧元数据（`src/frame_timing.h`），随结果一路传到串口线程：
@@ -131,9 +143,18 @@ wsl -e bash -c "cd /mnt/e/study/LicheeRV/licheeRV-nano-greenTarget && \
       src/target_track.cpp src/green_detect.cpp -o /tmp/t && /tmp/t"
 ```
 
-覆盖 54 项：角度换算（含补偿/翻转/未标定）、卡尔曼收敛、状态机迁移、
-多目标锁定与切换、长宽比过滤，以及时间戳/采集帧间隔/dt/板端年龄（含时间倒退与
-无符号下溢保护）。**当前 54/54 通过。**
+覆盖 63 项：角度换算（含补偿/翻转/未标定）、卡尔曼收敛、状态机迁移、
+多目标锁定与切换、长宽比过滤、时间戳/采集帧间隔/dt/板端年龄（含时间倒退与
+无符号下溢保护），以及**瞄准点向上偏移**（offset=0/1.5、按框高缩放）。
+**当前 63/63 通过。**
+
+串口协议另有字节级自检（pty 冒充串口，跑生产代码 `uart_out.cpp`，不需要硬件）：
+
+```sh
+g++ -std=c++11 -O1 -Wall -Wextra -I src tests/uart_protocol_harness.cpp src/uart_out.cpp \
+    -o /tmp/uart_harness -pthread && /tmp/uart_harness
+# 期望：37 项全部通过，并打印真实帧字节（如 $GT,0,0.00,...,-1,0,0*02）
+```
 
 ### ⚠️ 标定参数目前是占位值
 

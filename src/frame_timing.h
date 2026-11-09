@@ -5,8 +5,7 @@
 //   2. capture_mono_us 表示「程序拿到这一帧」的时刻，**不是曝光时刻**；
 //      曝光→出图的延迟需要另外标定，不能从这里的差值推算；
 //   3. vi_pts_raw 只保存和统计，**不参与任何计算**。板端实测（2026-11-08，1280x720/80fps）
-//      单位是微秒、每帧差≈12500，见 docs/TIMESTAMP_LOGGING_IMPLEMENTATION_REPORT.md §4.3；
-//      换传感器或换驱动后需重新确认，代码不依赖该单位；
+//      单位是微秒、每帧差≈12500；换传感器或换驱动后需重新确认，代码不依赖该单位；
 //   4. 帧号 frame_id 与 TargetOut::seq（结果序号）是两套独立编号，不得混用：
 //      frame_id 每取到一帧 +1，seq 只在跟踪器状态更新时 +1。
 #ifndef GREEN_TARGET_FRAME_TIMING_H_
