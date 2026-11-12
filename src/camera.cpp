@@ -269,6 +269,31 @@ int main(int argc,char** argv){
     unsigned sel_confirm=5, sel_lost=10, sel_maxcand=8;
     unsigned uart_baud=115200, uart_rate=50;
     const char* uart_dev=getenv("UART_DEVICE"); if(!uart_dev||!*uart_dev)uart_dev="/dev/ttyS1";
+    // 串口帧格式：ascii = v1 文本帧（$GT,...，串口助手可直接看）；
+    //             binary = v2 定长二进制帧（28 字节 A5 5A ... CRC16，见 uart_frame.h）
+    // 默认 ascii，保证不配置时线上字节行为与之前完全一致。
+    const char* uart_format=getenv("UART_FORMAT"); if(!uart_format||!*uart_format)uart_format="ascii";
+    const bool uart_binary = !strcmp(uart_format,"binary");
+    if(!uart_binary && strcmp(uart_format,"ascii")){
+        fprintf(stderr,"Invalid UART_FORMAT '%s' (expect ascii|binary)\n",uart_format);
+        return 2;
+    }
+    // 接收方向（电控 → 视觉 CMD=0x02）：默认开，收到就把电控信息打到终端；只打印不处理。
+    bool uart_rx_print=true;
+    unsigned uart_rx_hz=10;
+    {
+        const char* rp=getenv("UART_RX_PRINT");
+        if(rp&&*rp){
+            if(!strcmp(rp,"false"))uart_rx_print=false;
+            else if(strcmp(rp,"true")){fprintf(stderr,"Invalid UART_RX_PRINT '%s' (expect true|false)\n",rp);return 2;}
+        }
+        const char* rh=getenv("UART_RX_PRINT_HZ");
+        if(rh&&*rh){
+            const int v=atoi(rh);
+            if(v<1||v>100){fprintf(stderr,"Invalid UART_RX_PRINT_HZ '%s' (expect 1..100)\n",rh);return 2;}
+            uart_rx_hz=static_cast<unsigned>(v);
+        }
+    }
 
     bool ok =
         env_flag("TRACK_ENABLE",true,track_on) &&
@@ -329,6 +354,9 @@ int main(int argc,char** argv){
     if(uart_on){
         gt::UartCfg uc; uc.enable=true; uc.device=uart_dev;
         uc.baud=static_cast<int>(uart_baud); uc.rate_hz=static_cast<int>(uart_rate);
+        uc.ascii=!uart_binary;   // false → 发 v2 二进制帧
+        uc.rx_print=uart_rx_print;               // 收到电控帧就打印
+        uc.rx_print_hz=static_cast<int>(uart_rx_hz);
         if(!g_uart.start(uc)){
             // 串口是联调必需通道，打不开就明确报错退出，而不是静默降级后
             // 让电控「收不到数据」却查不出原因。需要纯视觉时把 uart_enable 设 false。
@@ -665,7 +693,9 @@ int main(int argc,char** argv){
             if(det_count){printf("DETECT avg_ms=%.3f max_ms=%.3f proc_avg_ms=%.3f proc_max_ms=%.3f lat_avg_ms=%.3f lat_max_ms=%.3f calls=%lu stride=%d map_miss=%lu sample_ms=%.3f track_ms=%.3f ns=%d cand_max=%d\n",det_total_ms/det_count,g_det_max_ms,g_proc_total_ms/det_count,g_proc_max_ms,g_lat_total_ms/det_count,g_lat_max_ms,det_count,g_detect_stride,g_map_miss,samp_total_ms/det_count,track_total_ms/det_count,g_sample_steps,g_max_candidates);det_total_ms=0;det_count=0;samp_total_ms=0;track_total_ms=0;g_det_max_ms=0;g_proc_total_ms=0;g_proc_max_ms=0;g_lat_total_ms=0;g_lat_max_ms=0;}
             if(g_uart.running()){
                 const unsigned long us=g_uart.sent_frames();
-                printf("UART sent=%lu rate=%.2fHz errors=%lu\n",us,(us-g_uart_sent_prev)/(t-report),g_uart.send_errors());
+                printf("UART sent=%lu rate=%.2fHz errors=%lu | rx_frames=%lu rx_crc=%lu rx_other=%lu rx_age=%dms\n",
+                       us,(us-g_uart_sent_prev)/(t-report),g_uart.send_errors(),
+                       g_uart.rx_frames(),g_uart.rx_crc_errors(),g_uart.rx_other_frames(),g_uart.mcu_age_ms());
                 g_uart_sent_prev=us;
             }
             {

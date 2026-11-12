@@ -81,6 +81,9 @@ UART_ENABLE=false
 UART_DEVICE=/dev/ttyS1
 UART_BAUD=115200
 UART_RATE_HZ=50
+UART_FORMAT=ascii
+UART_RX_PRINT=true
+UART_RX_PRINT_HZ=10
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -143,6 +146,9 @@ while IFS= read -r line || [ -n "$line" ]; do
         uart_device) UART_DEVICE=$value;;
         uart_baud) UART_BAUD=$value;;
         uart_rate_hz) UART_RATE_HZ=$value;;
+        uart_format) UART_FORMAT=$value;;
+        uart_rx_print) UART_RX_PRINT=$value;;
+        uart_rx_print_hz) UART_RX_PRINT_HZ=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
@@ -161,6 +167,10 @@ case "$TRACK_ENABLE" in true|false) ;; *) config_error 'track_enable must be tru
 case "$CAM_INVERT_YAW" in true|false) ;; *) config_error 'cam_invert_yaw must be true or false';; esac
 case "$CAM_INVERT_PITCH" in true|false) ;; *) config_error 'cam_invert_pitch must be true or false';; esac
 case "$UART_ENABLE" in true|false) ;; *) config_error 'uart_enable must be true or false';; esac
+# 帧格式：ascii = v1 文本帧（$GT,...）；binary = v2 定长二进制帧（A5 5A ... CRC16，28 字节）
+case "$UART_FORMAT" in ascii|binary) ;; *) config_error 'uart_format must be ascii or binary';; esac
+case "$UART_RX_PRINT" in true|false) ;; *) config_error 'uart_rx_print must be true or false';; esac
+validate_integer uart_rx_print_hz "$UART_RX_PRINT_HZ" 1 100
 validate_float cam_fx "$CAM_FX"
 validate_float cam_fy "$CAM_FY"
 validate_float cam_cx "$CAM_CX"
@@ -203,7 +213,7 @@ validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
     echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
-echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ"
+echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ,fmt=$UART_FORMAT,rx=$UART_RX_PRINT@$UART_RX_PRINT_HZ"
     exit 0
 fi
 if [ "$DURATION" = '--recoding' ] || [ "$DURATION" = '--recording' ]; then
@@ -336,6 +346,9 @@ export UART_ENABLE="$UART_ENABLE"
 export UART_DEVICE="$UART_DEVICE"
 export UART_BAUD="$UART_BAUD"
 export UART_RATE_HZ="$UART_RATE_HZ"
+export UART_FORMAT="$UART_FORMAT"
+export UART_RX_PRINT="$UART_RX_PRINT"
+export UART_RX_PRINT_HZ="$UART_RX_PRINT_HZ"
 if [ "$RECORDING" -eq 1 ]; then
     RECORD_DIR="$ROOT/recordings"
     mkdir -p "$RECORD_DIR"

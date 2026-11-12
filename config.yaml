@@ -119,4 +119,14 @@ uart_device: /dev/ttyS1
 uart_baud: 115200
 # 发送频率（Hz）。固定节奏发送，即使没有目标也发心跳帧。
 uart_rate_hz: 50
-
+# 帧格式：
+#   ascii  = v1 文本帧 `$GT,...*CS`（串口助手可直接看，校验和是 'GT,' 之后正文的 XOR）
+#   binary = v2 定长二进制帧（28 字节：A5 5A 15 SEQ 01 + 21 字节数据 + CRC16-CCITT-FALSE）
+#            协议见 docs/UART_PROTOCOL_V2_DESIGN.md，实现见 src/uart_frame.cpp
+# ⚠️ 只有电控侧解析器已按 v2 实现才切 binary，否则会「有数据但解析不出来」。
+# 出厂设为 binary：按 docs/UART_PROTOCOL_V2_DESIGN.md 与电控对接；用串口助手调试时改回 ascii 即可。
+uart_format: binary
+# 接收方向（电控 → 视觉 CMD=0x02）：跑程序时把电控发来的姿态/状态打印到终端，只打印不参与计算。
+# 电控按 100Hz 发，这里限频打印，避免刷屏；联调时改成 20 更跟手。
+uart_rx_print: true
+uart_rx_print_hz: 10

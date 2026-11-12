@@ -3,11 +3,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "uart_frame.h"
 
 namespace gt {
 namespace {
@@ -109,12 +112,18 @@ bool UartOut::open_device() {
   }
 
   fd_ = fd;
-  fprintf(stdout, "UART: %s @ %d 8N1, rate=%dHz, format=%s\n", cfg_.device.c_str(),
-          cfg_.baud, cfg_.rate_hz, cfg_.ascii ? "ascii" : "binary");
+  fprintf(stdout, "UART: %s @ %d 8N1, rate=%dHz, format=%s, rx_print=%s(%dHz)\n",
+          cfg_.device.c_str(), cfg_.baud, cfg_.rate_hz,
+          cfg_.ascii ? "ascii" : "binary-v2(28B)", cfg_.rx_print ? "on" : "off",
+          cfg_.rx_print_hz);
   return true;
 }
 
 void UartOut::close_device() {
+  if (tty_fd_ >= 0) {
+    ::close(tty_fd_);
+    tty_fd_ = -1;
+  }
   if (fd_ >= 0) {
     ::close(fd_);
     fd_ = -1;
@@ -137,6 +146,12 @@ int UartOut::write_all(const char* buf, int len) {
       // 发送缓冲满（对端没接/波特率不匹配）。最多重试 ~2ms 后放弃本帧，
       // 绝不死等，避免拖慢主流程或让发送线程卡住。
       if (++guard > 20) {
+        ++tx_full_errors_;
+        if (tx_full_errors_ <= 3 || (tx_full_errors_ % 500) == 0) {
+          fprintf(stderr, "UART tx full: 连续写不出去（第 %lu 次），errno=EAGAIN\n",
+                  tx_full_errors_);
+          fflush(stderr);
+        }
         return off;
       }
       struct timespec ts{0, 100000};   // 100us
@@ -145,6 +160,12 @@ int UartOut::write_all(const char* buf, int len) {
     }
     if (n < 0 && errno == EINTR) {
       continue;
+    }
+    // 其它错误（EIO 掉线、ENODEV 等）：打一次日志，便于现场定位
+    ++tx_hard_errors_;
+    if (tx_hard_errors_ <= 3) {
+      fprintf(stderr, "UART write failed: errno=%d (%s)\n", errno, strerror(errno));
+      fflush(stderr);
     }
     return off > 0 ? off : -1;
   }
@@ -232,6 +253,19 @@ int UartOut::format_ascii(const TargetOut& out, char* buf, int cap) const {
   return written;
 }
 
+// 组装二进制 v2 帧（28 字节），返回帧长；失败返回 0。
+// 数据区规则（detected==0 时角度清零、dist=-1.0）在 v2_make_data() 里，可在主机上单测；
+// 帧序号用本类自己的计数器，不复用 TargetOut::seq（那是「跟踪器更新次数」，会跳变）。
+int UartOut::format_v2(const TargetOut& out, uint8_t* buf, int cap) {
+  const V2Data d = v2_make_data(out.detected, out.yaw_deg, out.pitch_deg, out.v_yaw_dps,
+                                out.v_pitch_dps, out.distance_valid, out.distance_m);
+  const int n = build_v2_frame(d, frame_seq_, buf, cap);
+  if (n > 0) {
+    ++frame_seq_;   // uint8_t 自然 0..255 回绕
+  }
+  return n;
+}
+
 void UartOut::thread_main() {
   const int period_us = 1000000 / (cfg_.rate_hz > 0 ? cfg_.rate_hz : 50);
   double next_ms = mono_ms();
@@ -257,7 +291,10 @@ void UartOut::thread_main() {
       add_write_start_age(
           frame_age_us(snapshot.has_timing, snapshot.timing.capture_mono_us, write_start_us));
 
-      const int len = format_ascii(snapshot.target, frame, sizeof(frame));
+      const int len = cfg_.ascii
+                          ? format_ascii(snapshot.target, frame, sizeof(frame))
+                          : format_v2(snapshot.target, reinterpret_cast<uint8_t*>(frame),
+                                      sizeof(frame));
       if (len > 0) {
         const int w = write_all(frame, len);
         if (w == len) {
@@ -268,19 +305,162 @@ void UartOut::thread_main() {
       }
     }
 
-    // 固定节奏：用绝对时间推进，避免累积漂移
+    // 收电控帧：非阻塞抽一次（不改变原来的发送节奏）
+    drain_rx();
+
+    // 固定节奏：用绝对时间推进，避免累积漂移（与加接收前完全一致）
     next_ms += static_cast<double>(period_us) / 1000.0;
     const double now = mono_ms();
     if (next_ms < now) {
       next_ms = now;   // 落后了就不补发，直接对齐到当前
     }
     const long sleep_us = static_cast<long>((next_ms - now) * 1000.0);
-    if (sleep_us > 0) {
-      struct timespec ts{static_cast<time_t>(sleep_us / 1000000),
-                         static_cast<long>((sleep_us % 1000000) * 1000)};
+    if (sleep_us <= 0) {
+      continue;
+    }
+    // 睡眠期间用 poll 等"串口可读"：可读就立刻起来收帧，然后补足剩余睡眠时间。
+    // 这样接收延迟最长 1 个发送周期（20ms@50Hz），但发送节奏完全不受影响。
+    const double deadline = next_ms;
+    if (fd_ >= 0) {
+      struct pollfd p{};
+      p.fd = fd_;
+      p.events = POLLIN;
+      const int wait_ms = static_cast<int>(sleep_us / 1000);
+      if (wait_ms > 0 && poll(&p, 1, wait_ms) > 0) {
+        drain_rx();
+      }
+    }
+    const double rest = deadline - mono_ms();
+    if (rest > 0.0) {
+      const long rest_us = static_cast<long>(rest * 1000.0);
+      struct timespec ts{static_cast<time_t>(rest_us / 1000000),
+                         static_cast<long>((rest_us % 1000000) * 1000)};
       nanosleep(&ts, nullptr);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// 接收方向：电控 → 视觉（CMD=0x02）。只解析 + 打印，不参与任何计算。
+// 非阻塞：有多少读多少，绝不等待（等待由 thread_main 的 poll+nanosleep 负责）。
+// ---------------------------------------------------------------------------
+void UartOut::drain_rx() {
+  if (fd_ < 0) {
+    return;
+  }
+  uint8_t buf[512];
+  for (int round = 0; round < 16; ++round) {
+    const ssize_t n = ::read(fd_, buf, sizeof(buf));
+    if (n <= 0) {
+      break;
+    }
+    for (ssize_t i = 0; i < n; ++i) {
+      McuState m;
+      const V2StreamParser::FeedResult r = rx_parser_.feed(buf[i], &m);
+      if (r == V2StreamParser::kMcuFrame) {
+        on_mcu_frame(m);
+      }
+    }
+  }
+  // 统计计数与解析结果无关（CRC 错、其它 CMD 也会变），每次抽完同步一次
+  {
+    std::lock_guard<std::mutex> g(mcu_mu_);
+    rx_frames_ = rx_parser_.frames();
+    rx_crc_errors_ = rx_parser_.crc_errors();
+    rx_other_frames_ = rx_parser_.other_cmd();
+  }
+}
+
+void UartOut::on_mcu_frame(const McuState& m) {
+  const double now = mono_ms();
+  {
+    std::lock_guard<std::mutex> g(mcu_mu_);
+    last_mcu_ = m;
+    has_mcu_ = true;
+    last_mcu_ms_ = now;
+    rx_frames_ = rx_parser_.frames();
+    rx_crc_errors_ = rx_parser_.crc_errors();
+    rx_other_frames_ = rx_parser_.other_cmd();
+  }
+
+  if (!rx_announced_) {
+    rx_announced_ = true;
+    if (!tty_tried_) {
+      tty_tried_ = true;
+      tty_fd_ = ::open("/dev/tty", O_WRONLY | O_NOCTTY | O_NONBLOCK);
+    }
+    printf("[MCU] 收到电控数据（CMD=0x02，33 字节帧），下面按 %dHz 打印\n", cfg_.rx_print_hz);
+    fflush(stdout);
+  }
+  maybe_print_mcu(now);
+}
+
+void UartOut::maybe_print_mcu(double now_ms) {
+  if (!cfg_.rx_print) {
+    return;
+  }
+  const int hz = (cfg_.rx_print_hz > 0 && cfg_.rx_print_hz <= 100) ? cfg_.rx_print_hz : 10;
+  const double period = 1000.0 / static_cast<double>(hz);
+  if (last_print_ms_ >= 0.0 && (now_ms - last_print_ms_) < period) {
+    return;
+  }
+  last_print_ms_ = now_ms;
+
+  const McuState& m = last_mcu_;
+  const char* st = (m.state == kMcuStateFlight)   ? "FLIGHT"
+                   : (m.state == kMcuStateStop) ? "STOP"
+                                                : "STATIC";
+  const int age_ms = (last_mcu_ms_ < 0.0) ? -1 : static_cast<int>(now_ms - last_mcu_ms_);
+  char line[256];
+  const int n = snprintf(line, sizeof(line),
+                         "[MCU] seq=%3u state=%s flags=0x%02X(imu=%d bias=%d acc=%d) "
+                         "roll=%7.2f pitch=%7.2f yaw=%8.2f | gx=%7.2f gy=%7.2f gz=%7.2f | age=%dms\n",
+                         static_cast<unsigned>(m.seq), st, static_cast<unsigned>(m.flags),
+                         m.imu_valid() ? 1 : 0, (m.flags & kMcuFlagBiasReady) ? 1 : 0,
+                         (m.flags & kMcuFlagAccValid) ? 1 : 0, m.roll, m.pitch, m.yaw, m.gx, m.gy,
+                         m.gz, age_ms);
+  if (n <= 0) {
+    return;
+  }
+  fputs(line, stdout);   // 进日志文件（start.sh 重定向）
+  fflush(stdout);        // 输出被重定向到日志文件时也要能立刻看到
+  if (tty_fd_ >= 0) {
+    const ssize_t w = ::write(tty_fd_, line, static_cast<size_t>(n));   // 同时打到终端
+    (void)w;
+  }
+}
+
+bool UartOut::has_mcu() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return has_mcu_;
+}
+
+McuState UartOut::last_mcu() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return last_mcu_;
+}
+
+int UartOut::mcu_age_ms() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  if (!has_mcu_ || last_mcu_ms_ < 0.0) {
+    return -1;
+  }
+  return static_cast<int>(mono_ms() - last_mcu_ms_);
+}
+
+unsigned long UartOut::rx_frames() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return rx_frames_;
+}
+
+unsigned long UartOut::rx_crc_errors() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return rx_crc_errors_;
+}
+
+unsigned long UartOut::rx_other_frames() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return rx_other_frames_;
 }
 
 std::string UartOut::last_error() const {

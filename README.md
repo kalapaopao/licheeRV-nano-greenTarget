@@ -1,5 +1,7 @@
 # licheeRV-nano-greenTarget
 
+连接与预览操作见 [USB、Wi-Fi、手机热点及固定地址指南](docs/NETWORK_CONNECTION_GUIDE.md)。
+
 LicheeRV Nano（SG2002 + GC4653）80fps 取流工程 + 绿色圆灯传统视觉检测。
 
 在原 `fly_LicheeRV` 取流项目基础上集成 PC 端验证过的 `green_target` 检测算法（C++ 移植版），
@@ -72,8 +74,10 @@ sh stop.sh                     # 停止（另一终端或 Ctrl+C）
 - 检测输出：日志中 `GREEN_TARGET state=confirmed yaw=.. pitch=.. dist=.. age=.. frame=..`
   （限频 10Hz）；每 5 秒另有 `DETECT` / `TIMING` / `PTS_STAT` / `UART` 统计行，
   字段含义见 [docs/UART_PROTOCOL.md](docs/UART_PROTOCOL.md) 第六节
-- 串口输出：`uart_enable: true` 后把角度发给电控，协议见
-  **[docs/UART_PROTOCOL.md](docs/UART_PROTOCOL.md)**
+- 串口输出：`uart_enable: true` 后把角度发给电控。**出厂 `uart_format: binary`（v2 二进制 28 字节帧）**，
+  协议见 **[docs/UART_PROTOCOL_V2_DESIGN.md](docs/UART_PROTOCOL_V2_DESIGN.md)**；
+  改 `uart_format: ascii` 可切回文本帧（串口助手抓包用），见
+  [docs/UART_PROTOCOL.md](docs/UART_PROTOCOL.md)
 
 ## 阶段1：多目标筛选 + 卡尔曼 + 角度 + 串口
 
