@@ -113,6 +113,8 @@ class UartOut {
   void thread_main();
   bool open_device();
   void close_device();
+  bool apply_raw_termios(bool log_once);   // 设为 raw 8N1 并解除输出暂停
+  void guard_termios(double now_ms);       // 防止 tty 被 getty/login 改回非 raw
   int write_all(const char* buf, int len);
   int format_ascii(const TargetOut& out, char* buf, int cap) const;
   // 二进制 v2 帧：返回帧长（28），失败返回 0。帧序号用独立计数器（每发一帧 +1，0..255 回绕），
@@ -164,6 +166,10 @@ class UartOut {
   std::atomic<unsigned long> send_errors_{0};
   unsigned long tx_full_errors_ = 0;   // 发送缓冲满（EAGAIN）放弃次数
   unsigned long tx_hard_errors_ = 0;   // 其它写错误（EIO 等）次数
+  double last_termios_check_ms_ = -1.0;
+  unsigned long termios_repairs_ = 0;  // tty 参数被外部改回、我们恢复的次数
+  unsigned long hard_errors_at_reopen_ = 0;
+  unsigned long link_reopens_ = 0;     // 因连续写失败而重开设备的次数
 
   mutable std::mutex err_mu_;
   std::string last_error_;

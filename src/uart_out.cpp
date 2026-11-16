@@ -93,30 +93,101 @@ bool UartOut::open_device() {
     fprintf(stderr, "UART: %s\n", last_error_.c_str());
     return false;
   }
-
-  struct termios opt{};
-  if (tcgetattr(fd, &opt) == 0) {
-    cfmakeraw(&opt);                       // raw：不做任何字符转换
-    const speed_t sp = to_speed(cfg_.baud);
-    cfsetispeed(&opt, sp);
-    cfsetospeed(&opt, sp);
-    opt.c_cflag |= (CLOCAL | CREAD);       // 忽略调制解调器控制线，允许接收
-    opt.c_cflag &= ~CRTSCTS;               // 不用硬件流控
-    opt.c_cflag &= ~CSTOPB;                // 1 位停止位
-    opt.c_cflag &= ~PARENB;                // 无校验
-    opt.c_cflag &= ~CSIZE;
-    opt.c_cflag |= CS8;                    // 8 位数据
-    opt.c_cc[VMIN] = 0;
-    opt.c_cc[VTIME] = 0;
-    tcsetattr(fd, TCSANOW, &opt);
-  }
-
   fd_ = fd;
+  apply_raw_termios(true);
   fprintf(stdout, "UART: %s @ %d 8N1, rate=%dHz, format=%s, rx_print=%s(%dHz)\n",
           cfg_.device.c_str(), cfg_.baud, cfg_.rate_hz,
           cfg_.ascii ? "ascii" : "binary-v2(28B)", cfg_.rx_print ? "on" : "off",
           cfg_.rx_print_hz);
   return true;
+}
+
+// 把串口设成 raw 8N1。返回 true = 设置成功。
+// 单独抽出来是因为这个口可能被别的进程（getty/login）改回去，需要周期性重设。
+bool UartOut::apply_raw_termios(bool log_once) {
+  if (fd_ < 0) {
+    return false;
+  }
+  struct termios opt{};
+  if (tcgetattr(fd_, &opt) != 0) {
+    return false;
+  }
+  cfmakeraw(&opt);                       // raw：不做任何字符转换、关掉 IXON/ICANON/ECHO
+  const speed_t sp = to_speed(cfg_.baud);
+  cfsetispeed(&opt, sp);
+  cfsetospeed(&opt, sp);
+  opt.c_cflag |= (CLOCAL | CREAD);       // 忽略调制解调器控制线，允许接收
+  opt.c_cflag &= ~CRTSCTS;               // 不用硬件流控
+  opt.c_cflag &= ~CSTOPB;                // 1 位停止位
+  opt.c_cflag &= ~PARENB;                // 无校验
+  opt.c_cflag &= ~CSIZE;
+  opt.c_cflag |= CS8;                    // 8 位数据
+  opt.c_cc[VMIN] = 0;
+  opt.c_cc[VTIME] = 0;
+  const int rc = tcsetattr(fd_, TCSANOW, &opt);
+  // 顺便解除"输出暂停"（可能被 0x13/XOFF 冻住）
+  tcflow(fd_, TCOON);
+  if (rc != 0) {
+    return false;
+  }
+  if (log_once) {
+    fprintf(stdout, "UART: raw 8N1 已设置（IXON/ICANON/ECHO 全部关闭）\n");
+    fflush(stdout);
+  }
+  return true;
+}
+
+// 周期性守护：这个 tty 可能被 getty/login 改回 canonical + IXON。
+// 一旦发现被改回去（或发送连续失败），重新设 raw 并解除输出暂停。
+// 原因：电控帧是二进制，里面必然出现 0x11/0x13；如果 IXON 被打开，
+// 这两个字节会被当成 XON/XOFF，直接把我们的发送冻住（实测症状：sent 停住、errors 持续增长）。
+void UartOut::guard_termios(double now_ms) {
+  if (fd_ < 0) {
+    return;
+  }
+  const bool due = (last_termios_check_ms_ < 0.0) || (now_ms - last_termios_check_ms_ >= 2000.0);
+  if (!due) {
+    return;
+  }
+  last_termios_check_ms_ = now_ms;
+
+  struct termios cur{};
+  if (tcgetattr(fd_, &cur) != 0) {
+    return;
+  }
+  const bool polluted = ((cur.c_iflag & (IXON | IXOFF | ICRNL)) != 0) ||
+                        ((cur.c_lflag & (ICANON | ECHO)) != 0) || ((cur.c_cflag & CSIZE) != CS8) ||
+                        ((cur.c_cflag & PARENB) != 0);
+  if (!polluted && tx_full_errors_ == 0) {
+    // 还有一种坏情况：tty 被 hangup，write 一直返回 EIO（对端/占用者关闭设备）。
+    // 这种只能重开设备。2 秒一次检查，累计 20 次硬错误就重开。
+    if (tx_hard_errors_ - hard_errors_at_reopen_ < 20) {
+      return;
+    }
+    close_device();
+    if (!open_device()) {
+      fprintf(stderr, "UART: 重开设备失败，稍后再试\n");
+      fflush(stderr);
+    } else {
+      ++link_reopens_;
+      fprintf(stderr, "UART: 连续写失败(EIO 等)%lu 次，已重开 %s（第 %lu 次）\n",
+              tx_hard_errors_ - hard_errors_at_reopen_, cfg_.device.c_str(), link_reopens_);
+      fflush(stderr);
+    }
+    hard_errors_at_reopen_ = tx_hard_errors_;
+    return;
+  }
+  apply_raw_termios(false);
+  if (polluted) {
+    ++termios_repairs_;
+    if (termios_repairs_ <= 3 || (termios_repairs_ % 50) == 0) {
+      fprintf(stderr,
+              "UART: tty 被外部改回非 raw（IXON/ICANON 等），已自动恢复；第 %lu 次\n",
+              termios_repairs_);
+      fflush(stderr);
+    }
+  }
+  tx_full_errors_ = 0;   // 清掉计数，让下一次失败重新触发恢复
 }
 
 void UartOut::close_device() {
@@ -307,6 +378,8 @@ void UartOut::thread_main() {
 
     // 收电控帧：非阻塞抽一次（不改变原来的发送节奏）
     drain_rx();
+    // 防止这个口被 getty/login 改回 canonical/IXON（会把我们的二进制发送冻住）
+    guard_termios(mono_ms());
 
     // 固定节奏：用绝对时间推进，避免累积漂移（与加接收前完全一致）
     next_ms += static_cast<double>(period_us) / 1000.0;
