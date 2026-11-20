@@ -163,7 +163,6 @@ class FrameLog {
   // 辅助文件（健康行 / 视频侧车）：相机线程与编码线程直接追加
   mutable std::mutex aux_mu_;
   int health_fd_ = -1;
-  int video_fd_ = -1;        // 全程侧车（没有会话时用）
   int sess_video_fd_ = -1;   // 会话内侧车：<会话目录>/video_frames.csv
 
   // 统计（写线程与相机线程都会读）

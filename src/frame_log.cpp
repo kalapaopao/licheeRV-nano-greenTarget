@@ -150,26 +150,8 @@ bool FrameLog::start(const LogCfg& cfg) {
   cap_ = cfg_.ring_rows;
   head_ = tail_ = count_ = 0;
 
-  // 健康行/视频侧车：整场只开一次，不随会话开关
-  char name[64];
-  snprintf(name, sizeof(name), "/health_%lus_%ld.csv", uptime_s(), static_cast<long>(getpid()));
-  health_fd_ = open_append(dir_ + name, true);
-  if (health_fd_ < 0) {
-    return false;
-  }
-  const char* hh =
-      "mono_us,fps,frames,encoded,mcu_rx,mcu_age_ms,session_open,dropped\n";
-  int err = 0;
-  put_fd(health_fd_, hh, static_cast<int>(strlen(hh)), &err);
-
-  snprintf(name, sizeof(name), "/video_frames_%lus_%ld.csv", uptime_s(),
-           static_cast<long>(getpid()));
-  video_fd_ = open_append(dir_ + name, true);
-  if (video_fd_ < 0) {
-    return false;
-  }
-  const char* vh = "avi_index,frame_id,capture_us,pts_raw\n";
-  put_fd(video_fd_, vh, static_cast<int>(strlen(vh)), &err);
+  // 说明：启动时不创建任何文件。健康行和视频侧车都跟着「会话」走——
+  // 没有起飞触发，磁盘上就干干净净（这一条是用户明确要求的：没飞就不该有产物）。
 
   quit_.store(false);
   running_.store(true);
@@ -200,11 +182,6 @@ void FrameLog::stop() {
     ::fdatasync(health_fd_);
     ::close(health_fd_);
     health_fd_ = -1;
-  }
-  if (video_fd_ >= 0) {
-    ::fdatasync(video_fd_);
-    ::close(video_fd_);
-    video_fd_ = -1;
   }
 }
 
@@ -336,11 +313,11 @@ void FrameLog::on_video(unsigned long avi_index, uint32_t frame_id, MonoUs captu
     return;
   }
   std::lock_guard<std::mutex> g(aux_mu_);
-  // 会话进行中：侧车写进会话目录（和 video.avi、frames.csv 放在一起），并记下区间
-  int fd = video_fd_;
+  // 侧车只写进会话目录（和 video.avi、frames.csv 放在一起）；
+  // 没有会话就没有视频，自然也不该有侧车
+  int fd = -1;
   if (session_open_flag_.load() != 0 && sess_video_fd_ >= 0) {
     fd = sess_video_fd_;
-    const unsigned long none = kAviNone;
     unsigned long first = sess_avi_first_.load();
     while (avi_index < first && !sess_avi_first_.compare_exchange_weak(first, avi_index)) {
       first = sess_avi_first_.load();
@@ -348,7 +325,6 @@ void FrameLog::on_video(unsigned long avi_index, uint32_t frame_id, MonoUs captu
     sess_avi_last_.store(avi_index);
     sess_avi_rows_.fetch_add(1);
   }
-  (void)kAviNone;
   if (fd < 0) {
     return;
   }
@@ -362,7 +338,9 @@ void FrameLog::on_video(unsigned long avi_index, uint32_t frame_id, MonoUs captu
 
 void FrameLog::on_health(double fps, unsigned long frames, unsigned long encoded,
                          unsigned long mcu_rx, int mcu_age_ms) {
-  if (!running_.load() || health_fd_ < 0) {
+  // 健康行只在会话期间落盘（写进 <会话目录>/health.csv）：
+  // 没触发就不产生任何文件，这是「一次飞行一个文件夹」的一部分。
+  if (!running_.load() || session_open_flag_.load() == 0) {
     return;
   }
   char line[160];
@@ -427,6 +405,7 @@ void FrameLog::open_session(MonoUs trigger_us) {
   meta_fd_ = open_append(session_dir_ + "/meta.txt", true);
   // 会话内侧车：这一段的 AVI 帧号 ↔ frame_id（AVI 也是本会话专属的 video.avi）
   sess_video_fd_ = open_append(session_dir_ + "/video_frames.csv", true);
+  health_fd_ = open_append(session_dir_ + "/health.csv", true);
   sess_avi_first_.store(kAviNone);
   sess_avi_last_.store(kAviNone);
   sess_avi_rows_.store(0);
@@ -445,6 +424,10 @@ void FrameLog::open_session(MonoUs trigger_us) {
   put_fd(frames_fd_, fh, static_cast<int>(strlen(fh)), &err);
   if (sess_video_fd_ >= 0) {
     put_fd(sess_video_fd_, vh2, static_cast<int>(strlen(vh2)), &err);
+  }
+  const char* hh2 = "mono_us,fps,frames,encoded,mcu_rx,mcu_age_ms,session_open,dropped\n";
+  if (health_fd_ >= 0) {
+    put_fd(health_fd_, hh2, static_cast<int>(strlen(hh2)), &err);
   }
   if (mcu_fd_ >= 0) {
     put_fd(mcu_fd_, mh, static_cast<int>(strlen(mh)), &err);
@@ -614,17 +597,12 @@ void FrameLog::sync_all() {
   // 只在锁内取 fd，真正的 fdatasync 放到锁外：否则相机线程的 1Hz 健康行
   // 会卡在 SD 卡的 fdatasync 上，跟着掉帧。
   int health = -1;
-  int video = -1;
   {
     std::lock_guard<std::mutex> g(aux_mu_);
     health = health_fd_;
-    video = video_fd_;
   }
   if (health >= 0) {
     ::fdatasync(health);
-  }
-  if (video >= 0) {
-    ::fdatasync(video);
   }
 }
 

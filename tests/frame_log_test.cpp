@@ -353,11 +353,11 @@ int main() {
     log.stop();
   }
 
-  // ---- 6. 健康行 / 视频侧车 ----
+  // ---- 6. 没触发时不能产生任何文件（健康行/侧车都跟着会话走）----
   {
     char path[512];
-    snprintf(path, sizeof(path), "%s/cont", root.c_str());
-    std::string cmd = std::string("ls ") + path;
+    snprintf(path, sizeof(path), "%s/idle", root.c_str());
+    std::string cmd = std::string("ls ") + path + " 2>/dev/null";
     FILE* p = popen(cmd.c_str(), "r");
     std::string listing;
     if (p != nullptr) {
@@ -365,8 +365,10 @@ int main() {
       while (fgets(buf, sizeof(buf), p) != nullptr) listing += buf;
       pclose(p);
     }
-    check(listing.find("health_") != std::string::npos, "生成了 health_*.csv");
-    check(listing.find("video_frames_") != std::string::npos, "生成了 video_frames_*.csv");
+    check(listing.find("health") == std::string::npos,
+          "待机时不生成 health_*.csv", "dir=" + std::string(path));
+    check(listing.find("video_frames") == std::string::npos,
+          "待机时不生成 video_frames_*.csv");
   }
 
   printf("\n=== %d passed, %d failed ===\n", g_pass, g_fail);

@@ -511,12 +511,19 @@ CHANGED=1
 devmem "$REG" 32 "$TARGET"
 [ "$(clock)" = "$TARGET" ] || { echo CLOCK_SWITCH_FAILED; exit 5; }
 echo "CAMERA_RUNNING fps_target=80 exposure_mode=$EXPOSURE_MODE manual_exposure_us=$MANUAL_EXP_US jpeg_quality=$JPEG_QUALITY duration=${DURATION}s"
+# 这里只说「武装/关闭」，不要说「正在录」：真正开录要等电控的起飞边沿（log_mode: trigger）
 if [ "$RECORDING" -eq 1 ]; then
-    echo "RECORDING_MODE=ON output_dir=$RECORD_DIR format=AVI/MJPEG"
+    echo "RECORDING_ARMED output_dir=$RECORD_DIR format=AVI/MJPEG (等待起飞触发才写文件)"
+else
+    echo "RECORDING_OFF (record_enable=false)"
 fi
-echo "WEB_READY http://$WEB_IP:8081/"
+if [ "$HTTP_ENABLE" = "true" ] && [ "$DISPLAY_ENABLE" = "true" ]; then
+    echo "WEB_READY http://$WEB_IP:8081/"
+else
+    echo "WEB_DISABLED (http_enable=$HTTP_ENABLE display_enable=$DISPLAY_ENABLE)"
+fi
 CAM_STARTED=1
-note ready "web=$WEB_IP cam_pid=$CAM_PID fps_target=80"
+note ready "web=$([ "$HTTP_ENABLE" = "true" ] && [ "$DISPLAY_ENABLE" = "true" ] && echo "$WEB_IP" || echo off) cam_pid=$CAM_PID fps_target=80"
 START=$(date +%s)
 LAST_STATS=''
 while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do

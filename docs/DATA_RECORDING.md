@@ -291,34 +291,40 @@ const McuState* mcu_snapshot(McuState* out) {
 
 ```
 record/
-├── sess_1669s_546_001/            ← 一次飞行一个文件夹（sess_<开机秒>s_<pid>_<序号>）
-│   ├── frames.csv                 每帧一行，33 列（视觉 + 电控 9 列）
-│   ├── meta.txt                   触发/落地时刻、行数、视频区间、配置快照
-│   ├── video.avi                  本次飞行的视频（触发时开始，落地 + postroll 后收尾）
-│   ├── video_frames.csv           AVI 第 k 帧 ↔ frame_id（视频和 CSV 的桥梁）
-│   └── mcu.csv                    （可选）log_mcu_stream=true 时才有
-├── video_frames_<开机秒>s_<pid>.csv  只有「没开记录」时才用的全程侧车
-└── health_<开机秒>s_<pid>.csv        1Hz 健康行（全程，不属于某次飞行）
+└── sess_1683s_2531_001/           ← 一次飞行一个文件夹（sess_<开机秒>s_<pid>_<序号>）
+    ├── frames.csv                 每帧一行，33 列（视觉 + 电控 9 列）
+    ├── meta.txt                   触发/落地时刻、行数、视频区间、配置快照
+    ├── video.avi                  本次飞行的视频（触发时开始，落地 + postroll 后收尾）
+    ├── video_frames.csv           AVI 第 k 帧 ↔ frame_id（视频和 CSV 的桥梁）
+    ├── health.csv                 本段 1Hz 健康行（fps/编码/电控年龄/丢行）
+    └── mcu.csv                    （可选）log_mcu_stream=true 时才有
 ```
 
-三个要点：
+**待机时 `record/` 是空的**：没收到起飞边沿就不创建任何文件（连 health 也不写）。
+这一点板上实测过——只启动不触发跑 20 秒，`ls record/` 无输出。
+
+四个要点：
 
 1. **录像跟飞行走**：`log_enable: true` + `log_mode: trigger` 时，编码线程在
    `STATE 0→1` 那一刻才开 `video.avi`，落地后（`STATE→STOP` 再记 postroll）收尾。
    所以一次飞行一个视频，和数据同处一个目录，不需要再切。
 2. **没开记录时退回连续录像**：`log_enable: false` + `record_enable: true` →
    仍然全程一个 `record/gc4653_<时间戳>_<pid>.avi`（调试用），`video_frames_*.csv` 也在 `record/` 根下。
-3. `meta.txt` 里新增三行，用来核对视频数量：
-   `video=video.avi`、`video_frames=587`、`video_first_avi=0`、`video_last_avi=586`。
+3. `meta.txt` 里新增四行，用来核对视频数量：
+   `video=video.avi`、`video_frames=538`、`video_first_avi=0`、`video_last_avi=537`。
+4. **健康行跟着会话走**：`health.csv` 在会话目录里，只记这一段飞行；待机时不产生文件。
 
-### 5.0 板端实测（2026-11-20，假电控触发一次）
+### 5.0 板端实测（2026-11-21，假电控触发一次）
 
 ```
-record/sess_1669s_546_001/
-  frames.csv        838 行 × 33 列
-  meta.txt          video_frames=587  video_last_avi=586
-  video.avi         14.86 MB（1280×720 MJPG）
-  video_frames.csv  587 行数据（0..586，与 meta 完全一致）
+待机（不触发）20 秒 → record/ 为空
+
+触发后 record/sess_1683s_2531_001/
+  frames.csv        782 行 × 33 列
+  health.csv        本段 1Hz 健康行
+  meta.txt          close_reason=landed  video_frames=538  video_last_avi=537
+  video.avi         15.7 MB（1280×720 MJPG）
+  video_frames.csv  538 行数据（0..537，与 meta 一致）
 ```
 
 AVI 结构自检（`python tools/check_avi.py video.avi`，不需要解码器）：
