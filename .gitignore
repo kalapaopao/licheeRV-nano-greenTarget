@@ -1,20 +1,28 @@
-# 鏉跨缂栬瘧浜х墿锛圧ISC-V 鍙墽琛屾枃浠朵笉鍏ュ簱锛?camera
+# 构建产物（RISC-V 交叉编译：产物名 camera）
 build/
 build_host/
 *.o
 *.a
 
-# 褰曞儚涓庣浉鏈洪攣锛堣繍琛屾湡浜х敓锛?recordings/
+# 视频与录像
+recordings/
 *.avi
 .camera.lock/
 
-# 杩愯鏃ュ織
+# 一次飞行一个文件夹（视频 + CSV + meta，数据不入库）
+record/
+logs/
+
+# 运行状态历史（run_history.log 是本机运行痕迹，不入库）
+state/
+
+# 日志
 *.log
 
-# 鍥炲綊娴嬭瘯鐨勫師濮嬪抚鏁版嵁锛堜綋绉ぇ锛屾寜闇€浠庡綍鍍忛噸鏂板鍑猴級
+# 测试产生的中间帧
 tests/*.i420
 
-# 缂栬緫鍣?绯荤粺
+# 编辑器 / 系统
 .vscode/
 .idea/
 Thumbs.db
@@ -28,3 +36,8 @@ $*.bkp
 
 # 第三方参考项目（各自独立 git 仓库，不参与本工程编译）
 third_party/
+
+# 不再使用手工 *.bak 备份：回退一律靠 git（见 README「开发约定」）
+*.bak
+*.bak_*
+backup/

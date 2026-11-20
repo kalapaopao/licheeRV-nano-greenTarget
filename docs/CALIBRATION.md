@@ -9,7 +9,7 @@ http://10.133.124.1:8081/snapshot.jpg 获取图片：
 python tools/gc4653_calibration.py --calib
 ~~~
 
-详细按键、离线模式和写回配置步骤见 tools/GC4653_CALIBRATION.md。
+详细按键、离线模式和写回配置步骤见 GC4653_CALIBRATION.md。
 
 third_party/hik_calibration 是面向海康 MVS USB 工业相机的独立参考项目，
 不参与 LicheeRV/GC4653 的板端编译。
@@ -136,7 +136,7 @@ python calibrate.py
 
 ### 2.4 填进 YAML
 
-把脚本输出的 4 个数填进 `config.yaml` 和 `config_boot.yaml`：
+把脚本输出的 4 个数填进 `config.yaml`：
 
 ```yaml
 cam_fx: 1015.3      # ← 用你的实际值
@@ -145,7 +145,7 @@ cam_cx: 638.2
 cam_cy: 371.5
 ```
 
-**两个文件都要改**（手动运行用 `config.yaml`，开机自启用 `config_boot.yaml`）。
+只改 `config.yaml` 一个文件——开机自启读的也是它（板端 `config_boot.yaml` 是它的软链接）。
 
 ---
 
@@ -293,7 +293,7 @@ target_diameter_m: 0.05     # 当前占位值 5cm，必须实测
 - [ ] `RMS < 0.5 px`
 - [ ] `cam_fx/fy` 在 900~1200 范围内（1280×720 的典型值）
 - [ ] `cam_cx` 在 600~680，`cam_cy` 在 340~400（应该在中心附近，但不一定正好 640/360）
-- [ ] `config.yaml` **和** `config_boot.yaml` 都改了
+- [ ] `config.yaml` 已更新
 - [ ] 重启后 `TRACK calib` 日志显示新值
 - [ ] 正中目标 yaw ≈ 0（±0.5°）
 - [ ] 左右符号正确（右为正）

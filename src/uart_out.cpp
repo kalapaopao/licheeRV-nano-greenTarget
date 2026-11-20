@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "uart_frame.h"
+#include "diag.h"
 
 namespace gt {
 namespace {
@@ -48,6 +49,11 @@ const char* state_code(TargetState s) {
 }  // namespace
 
 UartOut::~UartOut() { stop(); }
+
+void UartOut::set_mcu_sink(McuSink sink, void* user) {
+  mcu_sink_ = sink;
+  mcu_sink_user_ = user;
+}
 
 bool UartOut::start(const UartCfg& cfg) {
   cfg_ = cfg;
@@ -95,10 +101,12 @@ bool UartOut::open_device() {
   }
   fd_ = fd;
   apply_raw_termios(true);
-  fprintf(stdout, "UART: %s @ %d 8N1, rate=%dHz, format=%s, rx_print=%s(%dHz)\n",
-          cfg_.device.c_str(), cfg_.baud, cfg_.rate_hz,
-          cfg_.ascii ? "ascii" : "binary-v2(28B)", cfg_.rx_print ? "on" : "off",
-          cfg_.rx_print_hz);
+  if (gt::diag(gt::kDiagUart)) {
+    fprintf(stdout, "UART: %s @ %d 8N1, rate=%dHz, format=%s, rx_print=%s(%dHz), tx=%s\n",
+            cfg_.device.c_str(), cfg_.baud, cfg_.rate_hz,
+            cfg_.ascii ? "ascii" : "binary-v2(28B)", cfg_.rx_print ? "on" : "off",
+            cfg_.rx_print_hz, cfg_.tx_enable ? "on" : "off(rx only)");
+  }
   return true;
 }
 
@@ -130,7 +138,7 @@ bool UartOut::apply_raw_termios(bool log_once) {
   if (rc != 0) {
     return false;
   }
-  if (log_once) {
+  if (log_once && gt::diag(gt::kDiagUart)) {
     fprintf(stdout, "UART: raw 8N1 已设置（IXON/ICANON/ECHO 全部关闭）\n");
     fflush(stdout);
   }
@@ -353,7 +361,7 @@ void UartOut::thread_main() {
       }
     }
 
-    if (has) {
+    if (has && cfg_.tx_enable) {
       // 采样点在 write_all() 之前，所以这里得到的是「取帧→**开始写** UART」的年龄
       // （日志字段名带 write_start，避免被误读成写完成）。它与 TargetOut::age_ms
       // （跟踪器内部的数据陈旧度）是两个不同的量：后者进 ASCII 的 age 字段（语义不变），
@@ -446,14 +454,21 @@ void UartOut::drain_rx() {
 
 void UartOut::on_mcu_frame(const McuState& m) {
   const double now = mono_ms();
+  const MonoUs rx_us = monotonic_us();
   {
     std::lock_guard<std::mutex> g(mcu_mu_);
     last_mcu_ = m;
     has_mcu_ = true;
     last_mcu_ms_ = now;
+    last_mcu_rx_us_ = rx_us;
     rx_frames_ = rx_parser_.frames();
     rx_crc_errors_ = rx_parser_.crc_errors();
     rx_other_frames_ = rx_parser_.other_cmd();
+  }
+
+  // 通知上层（飞行记录器）：只做格式化入队，不做 I/O，所以放在串口线程里是安全的
+  if (mcu_sink_ != nullptr) {
+    mcu_sink_(m, rx_us, mcu_sink_user_);
   }
 
   if (!rx_announced_) {
@@ -462,14 +477,16 @@ void UartOut::on_mcu_frame(const McuState& m) {
       tty_tried_ = true;
       tty_fd_ = ::open("/dev/tty", O_WRONLY | O_NOCTTY | O_NONBLOCK);
     }
-    printf("[MCU] 收到电控数据（CMD=0x02，33 字节帧），下面按 %dHz 打印\n", cfg_.rx_print_hz);
-    fflush(stdout);
+    if (gt::diag(gt::kDiagMcu)) {
+      printf("[MCU] 收到电控数据（CMD=0x02，33 字节帧），下面按 %dHz 打印\n", cfg_.rx_print_hz);
+      fflush(stdout);
+    }
   }
   maybe_print_mcu(now);
 }
 
 void UartOut::maybe_print_mcu(double now_ms) {
-  if (!cfg_.rx_print) {
+  if (!cfg_.rx_print || !gt::diag(gt::kDiagMcu)) {
     return;
   }
   const int hz = (cfg_.rx_print_hz > 0 && cfg_.rx_print_hz <= 100) ? cfg_.rx_print_hz : 10;
@@ -513,12 +530,28 @@ McuState UartOut::last_mcu() const {
   return last_mcu_;
 }
 
+bool UartOut::mcu_snapshot(McuState* out, int* age_ms, MonoUs* rx_us) const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  if (!has_mcu_ || last_mcu_ms_ < 0.0) {
+    return false;
+  }
+  if (out != nullptr) *out = last_mcu_;
+  if (age_ms != nullptr) *age_ms = static_cast<int>(mono_ms() - last_mcu_ms_);
+  if (rx_us != nullptr) *rx_us = last_mcu_rx_us_;
+  return true;
+}
+
 int UartOut::mcu_age_ms() const {
   std::lock_guard<std::mutex> g(mcu_mu_);
   if (!has_mcu_ || last_mcu_ms_ < 0.0) {
     return -1;
   }
   return static_cast<int>(mono_ms() - last_mcu_ms_);
+}
+
+MonoUs UartOut::mcu_rx_us() const {
+  std::lock_guard<std::mutex> g(mcu_mu_);
+  return has_mcu_ ? last_mcu_rx_us_ : 0;
 }
 
 unsigned long UartOut::rx_frames() const {

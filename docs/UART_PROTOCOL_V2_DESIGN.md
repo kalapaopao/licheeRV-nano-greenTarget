@@ -14,7 +14,8 @@
 |---|---|
 | 接口 | UART，3.3V TTL，共地，TX/RX 交叉 |
 | 格式 | 115200 8N1，无流控 |
-| 视觉侧设备 | `/dev/ttyS1`（待对排针确认） |
+| 视觉侧设备 | `/dev/ttyS1`（= **UART1**，2026-11-20 起为正式通讯口） |
+| 排针引脚 | TX = GPIOA19，RX = GPIOA18（**以实测为准**，见 [UART_PROTOCOL.md](UART_PROTOCOL.md) 一"一分钟自检"） |
 | 发送节奏 | **固定 50Hz，有没有目标都发**（心跳） |
 
 ## 2. 帧格式（小端）
@@ -202,7 +203,6 @@ python tools/uart_accept.py --port COM7 --seconds 30 --label 靶子1米
 两边对同一帧的 `SEQ`、`yaw`、`dist` 应当完全一致 —— 这就是联调时最直接的"你说的和我收到的对得上"。
 
 ### 9.2 视觉侧接收电控帧并打印（`uart_rx_print`）
-
 跑 licheeRV 程序时，它**同时**接收电控发来的 `CMD=0x02`（33 字节）帧，并把内容打到终端：
 
 ```

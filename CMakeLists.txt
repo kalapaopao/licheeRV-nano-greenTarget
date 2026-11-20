@@ -56,6 +56,13 @@ target_link_directories(common_settings INTERFACE ${SDK_ROOT}/lib_dyn ${SDK_ROOT
 
 # 动态链接板端自带中间件（与原版 80fps 工程的 sdk/board-libs 方式一致）。
 # 板端 /mnt/system/usr/lib 里就有这些 .so，运行时由 start.sh 的 LD_LIBRARY_PATH 提供。
+#
+# -static-libstdc++ / -static-libgcc：必须显式加上。
+# 板端 /usr/lib 里那个 libstdc++.so.6 不是 musl 工具链的产物（加载了会崩），
+# 而 CMake 默认会动态链接 libstdc++.so.6 —— 之前部署的二进制是静态链 libstdc++ 的
+# （readelf -d 里没有 libstdc++.so.6 / libgcc_s.so.1），这里保持一致，避免上板起不来。
+target_link_options(common_settings INTERFACE -static-libstdc++ -static-libgcc)
+
 target_link_libraries(common_settings INTERFACE
     -Wl,--gc-sections
     -lsys -lvpu -lvenc -lisp -lisp_algo -lae -lawb -laf
@@ -71,6 +78,10 @@ set(APP_SRC
     src/uart_out.cpp
     # 串口协议 v2 的定长二进制帧（纯函数，无 POSIX/SDK 依赖，可主机单测）
     src/uart_frame.cpp
+    # 飞行数据记录：预录环形缓冲 + 触发落盘（只依赖 POSIX，可主机单测）
+    src/frame_log.cpp
+    # 诊断层：分类打印开关 + 运行状态历史 + 崩溃归因（只依赖 POSIX）
+    src/diag.cpp
     # 用户态 GC4653 驱动（含 720P_60FPS 模式表 + 1080P timing），替代 libsns_gc4653.a
     src/sensor/gc4653_cmos.c
     src/sensor/gc4653_sensor_ctl.c

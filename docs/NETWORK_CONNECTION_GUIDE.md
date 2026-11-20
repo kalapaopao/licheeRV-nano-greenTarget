@@ -330,7 +330,7 @@ ssh root@licheervnano-857c.local
 本地源码中：
 
 - 手动运行使用 /code/fly_LicheeRV/config.yaml。
-- 开机自启使用 /code/fly_LicheeRV/config_boot.yaml。
+- 开机自启使用 /code/fly_LicheeRV/config.yaml（板端 config_boot.yaml 是它的软链接）。
 - 建议 display_enable: true，web_ip: auto。
 - web_ip 只控制服务绑定地址，不设置 SSID、密码或网卡 IP。
 - web_ip: usb 当前仅绑定 10.133.124.1，不应期待备用 USB 地址也可访问。

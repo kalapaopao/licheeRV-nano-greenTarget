@@ -66,8 +66,8 @@ python tools/gc4653_calibration.py --calib --offline --save-dir calibration_imag
 python tools/gc4653_calibration.py --calib --offline --save-dir calibration_images --apply-config
 ~~~
 
-脚本会先创建 config.yaml.bak-calib 和 config_boot.yaml.bak-calib，
-然后更新 cam_fx、cam_fy、cam_cx、cam_cy。畸变系数会保存到
+脚本会先 `git diff` 提示当前未提交改动（回退一律用 `git checkout -- config.yaml`，
+不再生成 `*.bak` 备份），然后更新 cam_fx、cam_fy、cam_cx、cam_cy。畸变系数会保存到
 calibration/camera_intrinsics.yaml，但当前实时 gridToAngleDeg() 尚未应用畸变校正。
 
 ## --calib 的运行边界

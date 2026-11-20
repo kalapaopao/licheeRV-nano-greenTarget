@@ -92,7 +92,7 @@ libatomic.so.1  libc.so
 > 为什么最终用板端 .so 而不是自编 .a：
 > 自编 .a 与板端驱动的 ABI 在 720P 路径上有差异（曾表现为 `vi_sdk_enable_chn NG`
 > 与全绿画面）。改用板端 .so + 源码编译 sensor/common 后，80fps 与颜色才同时正确。
-> 详见 `docs/HANDOFF_ISSUE_720p_80fps.md`。
+> 详见 `docs/history/HANDOFF_ISSUE_720p_80fps.md`。
 
 ---
 
@@ -240,8 +240,8 @@ rm -rf ~/sipeed_sdk
 
 | 文档 | 内容 |
 |---|---|
-| `docs/HANDOFF_ISSUE_720p_80fps.md` | 720P/80fps 卡点的完整取证与提问清单 |
-| `docs/architecture/` | 4 页代码级图示（总览/主线程/帧所有权/线程同步）+ 对应 `.drawio` 源文件 |
+| `docs/history/HANDOFF_ISSUE_720p_80fps.md` | 720P/80fps 卡点的完整取证与提问清单 |
+| `docs/architecture/` | 4 页代码级图示（总览/主线程/帧所有权/线程同步）+ 生成脚本 `tools/draw_architecture.py` |
 | `docs/UART_PROTOCOL.md` | 视觉→电控串口协议（含字节级自检工具用法，见其 §八） |
 | `README.md` | 项目功能、编译、运行、已知限制 |
 

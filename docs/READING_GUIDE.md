@@ -415,7 +415,7 @@ TrackState { status, cx, cy, vx, vy, blob.radius }
         encoder_worker ──CVI_VENC_SendFrame()──> 硬件 JPEG
               │
               ├──> latest (jpeg_mutex + generation) ──> http_client ──> 浏览器
-              └──> AviMjpegWriter ──> recordings/*.avi
+              └──> AviMjpegWriter ──> record/sess_*/video.avi
 ```
 
 ---
@@ -498,6 +498,6 @@ if (g_frame_idx % 30 == 0)
 | 为什么不用 OpenCV / NPU | `README.md` 开头的功能说明 + 本文第 2 步 |
 | 为什么检测不单独开线程 | 本文第 4.2 节 + `architecture/11_主线程逐帧流水线.png` |
 | 为什么 mmap 要用 Cache 版本 | `camera.cpp` 里 `map_cached()` 上方注释：未缓存时 223ms/帧 |
-| 为什么传感器驱动要自己编译 | `HANDOFF_ISSUE_720p_80fps.md` |
+| 为什么传感器驱动要自己编译 | `docs/history/HANDOFF_ISSUE_720p_80fps.md` |
 | 整体架构图 | `architecture/10_总览与内存布局.png` |
 | 串口协议与自检 | `UART_PROTOCOL.md` |

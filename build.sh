@@ -14,15 +14,17 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$REPO/build"
 
 # 默认工具链与 SDK 位置（与本机既有环境一致）
+# CVI_SDK_ROOT 指向 SDK 产物目录（include/ lib/ lib_dyn/ kernel_include/），
+# 不是源码树 env/sipeed-sdk —— 见 docs/HANDOFF_WSL_BUILD_ENV.md 的已知问题记录。
 : "${COMPILER:=/mnt/e/study/LicheeRV/env/toolchain/host-tools/gcc/riscv64-linux-musl-x86_64/bin}"
-: "${CVI_SDK_ROOT:=/mnt/e/study/LicheeRV/env/sipeed-sdk/middleware/v2}"
+: "${CVI_SDK_ROOT:=/mnt/e/study/LicheeRV/env/sipeed-sdk-build}"
 export COMPILER CVI_SDK_ROOT
 
 echo "=== 环境 ==="
 echo "COMPILER     = $COMPILER"
 echo "CVI_SDK_ROOT = $CVI_SDK_ROOT"
 [ -x "$COMPILER/riscv64-unknown-linux-musl-gcc" ] || { echo "缺少交叉工具链"; exit 1; }
-[ -d "$CVI_SDK_ROOT/middleware/include" ] || { echo "缺少平台 SDK"; exit 1; }
+[ -d "$CVI_SDK_ROOT/include" ] || { echo "缺少平台 SDK"; exit 1; }
 "$COMPILER/riscv64-unknown-linux-musl-gcc" --version | head -1
 
 echo "=== 配置 ==="

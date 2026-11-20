@@ -1,7 +1,21 @@
-// fly_LicheeRV native GC4653 preview, copied from verified record80 VI/VENC/MJPEG pipeline.
-// No NPU inference or JavaScript drawing. Optional MJPEG AVI recording.
-// TODO: insert C++ native algorithm at VI-frame boundary.
-// Attribute/packet conventions: official sample_common_venc.c (see PREVIEW-HD.md).
+// =============================================================================
+// camera —— 板端主程序（LicheeRV Nano / SG2002 + GC4653）
+//
+// 一条数据链，四个线程：
+//
+//   [采集线程] VI 取帧 80Hz
+//        ├─ 抽点下采样 → 绿灯检测 → 多目标筛选 → 卡尔曼 → 角度      （green_detect / target_track）
+//        ├─ 画检测框（写回 Y 平面，网页和录像才看得到）
+//        ├─ 发布结果给串口线程（uart_out，50Hz 发给电控）
+//        ├─ 每帧一行交给记录器（frame_log，起飞/落地时落盘）
+//        └─ 把帧交给编码线程（只保留最新一帧，编码跟不上就丢）
+//   [编码线程] 硬件 JPEG → 网页预览 + AVI 录像 + 视频侧车
+//   [串口线程] 发目标帧；收电控 0x02 帧并回调记录器
+//   [HTTP 线程] MJPEG 预览/抓图
+//
+// 改这里之前先读：docs/DIAGNOSTICS.md（日志与开关）、docs/UART_PROTOCOL_V2_DESIGN.md（协议）、
+// docs/DATA_RECORDING.md（记录格式）。参数全部来自 config.yaml，经 start.sh 转成环境变量。
+// =============================================================================
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,24 +30,49 @@
 #include <unistd.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/prctl.h>
 #include <arpa/inet.h>
 #include "avi_mjpeg.h"
 #include "green_detect.h"
 #include "target_track.h"
 #include "uart_out.h"
 #include "frame_timing.h"
-// 绿色圆灯检测：主循环里抽点下采样 → 多候选筛选 → 卡尔曼 → 角度 → 串口
+#include "frame_log.h"
+#include "diag.h"
+#include "osd.h"
+
+// ---- 全局对象与运行期开关 ----
 static greendet::Detector g_detector;      // 多候选收集（不门控）
 static gt::TargetTracker g_target;         // 多目标筛选 + 卡尔曼 + 状态机
 static gt::UartOut g_uart;                 // 发给电控（独立线程）
+static gt::FrameLog g_log;                 // 飞行数据记录（预录环形缓冲 + 触发落盘）
+// UartOut 的接收回调：串口线程上下文，只格式化入队
+static void mcu_log_sink(const gt::McuState& m, gt::MonoUs rx_us, void* user) {
+    static_cast<gt::FrameLog*>(user)->on_mcu(m, rx_us);
+}
+// 给记录器取一份"当前电控状态"快照：从没收到过电控帧就返回 nullptr（记录器会写空值）
+static const gt::McuState* mcu_snapshot(gt::McuState* buf) {
+    if (!g_uart.mcu_snapshot(buf, nullptr, nullptr)) return nullptr;
+    return buf;
+}
 static bool g_track_on = true;             // track_enable：关闭时退回旧的单目标行为
 static int g_max_candidates = 8;
 static unsigned long green_frames=0,green_hits=0,green_reports=0;
-static double det_total_ms=0.0; static unsigned long det_count=0;
+static double det_total_ms=0.0;
+static unsigned long det_count=0;
 static double samp_total_ms=0.0, track_total_ms=0.0;
-static int g_detect_stride=1; static unsigned long g_frame_idx=0;
+static int g_detect_stride=1;
+static unsigned long g_frame_idx=0;
 static int g_sample_steps=2;   // 每块 n×n 采样点数（1..4）
 static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
+static bool g_osd_on=false;    // osd_enable：把电控状态烧进画面左上角
+static int g_osd_scale=1;      // 字号倍数（1..3）；字库本身已是 8×16，scale=1 就够看
+// 电控 STATE 的短标签（OSD 只有 ASCII 字库）
+static const char* mcu_state_txt(uint8_t s){
+    if(s==gt::kMcuStateFlight)return "FLIGHT";
+    if(s==gt::kMcuStateStop)return "STOP";
+    return "STATIC";
+}
 static bool g_draw_test_box=false;
 static unsigned long g_uart_sent_prev=0;
 // ---- 帧时间戳（见 frame_timing.h）：帧号 + 采集时刻 + 原始 PTS ----
@@ -104,20 +143,32 @@ static std::atomic<int> running(1);
 static_assert(ATOMIC_INT_LOCK_FREE==2,"Signal handler requires lock-free atomic int");
 static std::mutex jpeg_mutex;
 static std::vector<unsigned char> latest;
+// 当前打开的 AVI 归属：非空 = 正在录某次飞行（值是会话目录）；空 = 连续录像或没在录
+static std::string avi_owner;
 static unsigned long generation=0;
 static std::mutex input_mutex;
 static VIDEO_FRAME_INFO_S pending{};
 static bool has_pending=false;
+// 与 pending 配对：编码线程拿不到 FrameTiming，只能靠这两项写视频侧车
+static uint32_t pending_frame_id=0;
+static gt::MonoUs pending_capture_us=0;
+static double g_last_health_s=-1.0;   // health.csv 1 Hz 限频
 static std::atomic<unsigned long> encoded(0),errors(0);
 static std::atomic<unsigned long> network_sent(0),network_bytes(0),preview_replaced(0);
 static bool recording_enabled=false;
-// display_enable: false 时不启动编码线程与 HTTP 服务（实战模式，省电降温）
+// display_enable: false 时不画叠加、不起编码线程（实战模式，省电降温）
 static bool g_display_on=true;
+// http_enable: false 时不起网页服务（只用来省 CPU；录像/编码不受影响）
+static bool g_http_on=true;
+// 需要「编码并写录像」吗：开预览或开录像任一为真
+static bool g_encode_on=true;
 static std::string recording_dir;
 static std::atomic<int> recording_failed(0);
 static AviMjpegWriter avi;
 // Future: board-side native detection code will be added here; current code performs capture only.
-static void stop(int){running=0;}
+// 被哪个信号停下的：写进 run_history 的 exit 行，用来区分"正常运行完"和"被 stop.sh 停掉"
+static volatile sig_atomic_t g_stop_signal=0;
+static void stop(int sig){g_stop_signal=sig;running=0;}
 static double now(){timespec t{};clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
 static bool sendall(int fd,const void* ptr,size_t n){
     const char* p=static_cast<const char*>(ptr);
@@ -133,8 +184,11 @@ static void http_client(int fd){
     int sndbuf=128*1024;
     setsockopt(fd,SOL_SOCKET,SO_SNDBUF,&sndbuf,sizeof(sndbuf));
     char request[4096]{};
-    ssize_t n=recv(fd,request,sizeof(request)-1,0);
-    if(n<=0){close(fd);return;}
+    ssize_t n = recv(fd, request, sizeof(request) - 1, 0);
+    if (n <= 0) {
+        close(fd);
+        return;
+    }
     const bool snapshot=strncmp(request,"GET /snapshot.jpg ",18)==0;
     const bool stream=strncmp(request,"GET /live.mjpg ",15)==0;
     if(!snapshot && !stream){
@@ -148,23 +202,37 @@ static void http_client(int fd){
         const char header[]="HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
         sendall(fd,header,sizeof(header)-1);
         sendall(fd,page,sizeof(page)-1);
-        close(fd);return;
+        close(fd);
+        return;
     }
     if(stream){
         const char hdr[]="HTTP/1.0 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-store, no-cache\r\nPragma: no-cache\r\nConnection: close\r\n\r\n";
-        if(!sendall(fd,hdr,sizeof(hdr)-1)){close(fd);return;}
+        if(!sendall(fd,hdr,sizeof(hdr)-1)){
+            close(fd);
+            return;
+        }
     }
     unsigned long seen=0;
     while(running){
         std::vector<unsigned char> jpg;
-        {std::lock_guard<std::mutex> guard(jpeg_mutex);if(generation!=seen){seen=generation;jpg=latest;}}
-        if(jpg.empty()){usleep(5000);continue;}
+        {
+            std::lock_guard<std::mutex> guard(jpeg_mutex);
+            if(generation!=seen){
+                seen=generation;
+                jpg=latest;
+            }
+        }
+        if(jpg.empty()){
+            usleep(5000);
+            continue;
+        }
         char hdr[256];
         int count=snprintf(hdr,sizeof(hdr),snapshot?
             "HTTP/1.0 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n":
             "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %zu\r\n\r\n",jpg.size());
         if(count<=0 || !sendall(fd,hdr,static_cast<size_t>(count)) || !sendall(fd,jpg.data(),jpg.size()))break;
-        ++network_sent;network_bytes+=jpg.size();
+        ++network_sent;
+        network_bytes+=jpg.size();
         if(snapshot)break;
         if(!sendall(fd,"\r\n",2))break;
         // Limit *network preview* to about 20 FPS per client; the sensor and
@@ -190,7 +258,9 @@ static void http_server(int server){
         }
         if(!slot){
             const char busy[]="HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            sendall(fd,busy,sizeof(busy)-1);close(fd);continue;
+            sendall(fd,busy,sizeof(busy)-1);
+            close(fd);
+            continue;
         }
         slot->active=true;
         slot->worker=std::thread([fd,slot](){http_client(fd);slot->active=false;});
@@ -199,67 +269,165 @@ static void http_server(int server){
     for(auto& slot:slots)if(slot.worker.joinable())slot.worker.join();
 }
 static void encoder_worker(){
+    unsigned long avi_index=0;   // AVI 内第几帧（0 起），与 CSV 的 frame_id 不是一回事
     while(running){
-        VIDEO_FRAME_INFO_S frame{};bool got=false;
-        {std::lock_guard<std::mutex> guard(input_mutex);if(has_pending){frame=pending;has_pending=false;got=true;}}
-        if(!got){usleep(1000);continue;}
-        VENC_RECV_PIC_PARAM_S receive{};receive.s32RecvPicNum=1;
+        // 从主线程拿"最新一帧"（拿不到就等 1ms），同时取出该帧的帧号/采集时刻
+        VIDEO_FRAME_INFO_S frame{};
+        bool got=false;
+        uint32_t fid=0;
+        gt::MonoUs cap_us=0;
+        {
+            std::lock_guard<std::mutex> guard(input_mutex);
+            if(has_pending){
+                frame=pending;
+                fid=pending_frame_id;
+                cap_us=pending_capture_us;
+                has_pending=false;
+                got=true;
+            }
+        }
+        if(!got){
+            usleep(1000);
+            continue;
+        }
+
+        VENC_RECV_PIC_PARAM_S receive{};
+        receive.s32RecvPicNum=1;
         int e=CVI_VENC_StartRecvFrame(0,&receive);
         if(!e)e=CVI_VENC_SendFrame(0,&frame,1000);
         if(!e){
-            VENC_PACK_S packets[64]{};VENC_STREAM_S stream{};stream.pstPack=packets;stream.u32PackCount=64;
+            VENC_PACK_S packets[64]{};
+            VENC_STREAM_S stream{};
+            stream.pstPack=packets;
+            stream.u32PackCount=64;
             e=CVI_VENC_GetStream(0,&stream,1000);
             if(!e){
                 std::vector<unsigned char> jpg;
-                for(unsigned i=0;i<stream.u32PackCount;i++){const auto& p=packets[i];if(p.pu8Addr && p.u32Len>=p.u32Offset)jpg.insert(jpg.end(),p.pu8Addr+p.u32Offset,p.pu8Addr+p.u32Len);}
+                for(unsigned i=0;i<stream.u32PackCount;i++){
+                    const auto& p=packets[i];
+                    if(p.pu8Addr && p.u32Len>=p.u32Offset)jpg.insert(jpg.end(),p.pu8Addr+p.u32Offset,p.pu8Addr+p.u32Len);
+                }
                 CVI_VENC_ReleaseStream(0,&stream);
                 if(jpg.size()<4 || jpg[0]!=0xff || jpg[1]!=0xd8)e=-1;
                 else{
                     // Persist the same hardware JPEG frame sent to the browser: no second VI/VENC.
-                    if(recording_enabled && !avi.write(recording_dir,jpg.data(),jpg.size(),frame.stVFrame.u64PTS)){
-                        recording_failed=1;
-                        running=0;
+                    if(recording_enabled){
+                        // 录像归属：记录开着且是触发式 → 本次飞行的视频写进「会话目录/video.avi」，
+                        // 和数据（frames.csv/meta.txt）在同一个文件夹里；
+                        // 否则退回原来的连续录像（recordings/ 下一个大文件），供没开记录时调试用。
+                        std::string sdir;
+                        const bool in_sess=g_log.running() && g_log.session_video_dir(&sdir);
+                        if(in_sess){
+                            if(avi_owner!=sdir){
+                                if(avi.is_open() && !avi.finish())recording_failed=1;
+                                if(!avi.open_named(sdir,"video")){
+                                    recording_failed=1; running=0;
+                                }else{
+                                    avi_owner=sdir;
+                                    avi_index=0;      // 每段视频的帧号从 0 开始
+                                }
+                            }
+                        }else if(!avi_owner.empty()){
+                            // 会话刚刚结束：把这一段 AVI 收尾
+                            if(!avi.finish())recording_failed=1;
+                            avi_owner.clear();
+                            avi_index=0;
+                        }else if(!avi.is_open() && (!g_log.running() || !g_log.trigger_mode())){
+                            // 没开记录、或连续记录模式：保持全程一个文件
+                            if(!avi.open_named(recording_dir,"")){
+                                recording_failed=1; running=0;
+                            }
+                        }
+                        if(avi.is_open()){
+                            if(!avi.write(recording_dir,jpg.data(),jpg.size(),frame.stVFrame.u64PTS)){
+                                recording_failed=1;
+                                running=0;
+                            }else{
+                                g_log.on_video(avi_index++,fid,cap_us,frame.stVFrame.u64PTS);
+                            }
+                        }
                     }
-                    {std::lock_guard<std::mutex> guard(jpeg_mutex);latest.swap(jpg);++generation;}
+                    {
+                        std::lock_guard<std::mutex> guard(jpeg_mutex);
+                        latest.swap(jpg);
+                        ++generation;
+                    }
                     ++encoded;
                 }
             }
         }
         CVI_VENC_StopRecvFrame(0);
         CVI_VI_ReleaseChnFrame(0,0,&frame);
-        if(e){++errors;fprintf(stderr,"VENC encode rc=0x%x\n",e);if(errors>=5)running=0;}
+        if(e){
+            ++errors;
+            fprintf(stderr,"VENC encode rc=0x%x\n",e);
+            if(errors>=5)running=0;
+        }
     }
     std::lock_guard<std::mutex> guard(input_mutex);
-    if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);has_pending=false;}
+    if(has_pending){
+        CVI_VI_ReleaseChnFrame(0,0,&pending);
+        has_pending=false;
+    }
 }
 int main(int argc,char** argv){
-    // Public entrypoint delegates to the supervisor for YAML, clock, lock and cleanup.
+    // ======================================================================
+    // 0. 命令行：正常运行时由 start.sh 拉起，参数是  USB_BIND_IP OUTPUT_DIR [80] [--recording-internal]
+    // ======================================================================
     if(argc==2 && (!strcmp(argv[1],"--recoding") || !strcmp(argv[1],"--recording"))){
         execl("/bin/sh","sh","/code/fly_LicheeRV/start.sh","--recoding",static_cast<char*>(nullptr));
-        perror("Cannot launch recording supervisor");return 2;
+        perror("Cannot launch recording supervisor");
+        return 2;
     }
     if(argc==2 && (!strcmp(argv[1],"--help") || !strcmp(argv[1],"-h"))){
         printf("Usage: ./camera --recoding (alias --recording)\n"
-               "       sh start.sh [--recoding|seconds] (default preview 120 seconds)\n");return 0;
+               "       sh start.sh [--recoding|seconds] (default preview 120 seconds)\n");
+        return 0;
     }
     if((argc!=3 && argc!=4 && argc!=5) ||
        (argc==5 && strcmp(argv[4],"--recording-internal"))){
-        fprintf(stderr,"Usage: %s USB_BIND_IP OUTPUT_DIR [80] [--recording-internal]\n",argv[0]);return 2;
+        fprintf(stderr,"Usage: %s USB_BIND_IP OUTPUT_DIR [80] [--recording-internal]\n",argv[0]);
+        return 2;
     }
     recording_enabled=argc==5;
     if(recording_enabled)recording_dir=argv[2];
-    const char* mode="80";
+
+    // 孤儿保护：start.sh（监督进程）一旦死掉，内核给我发 SIGTERM，跟着优雅退出。
+    // 否则会出现"监督进程没了、相机还在满负荷跑"——没人看温度、没人重启，最危险的状态。
+    prctl(PR_SET_PDEATHSIG,SIGTERM);
+    if(getppid()==1){
+        fprintf(stderr,"parent already gone, refusing to run unsupervised\n");
+        return 3;
+    }
     if(argc>=4 && strcmp(argv[3],"80"))return 2;
+
+    // 几个不经过 start.sh 校验的调试开关（直接跑二进制时才用到）
     const char* disp=getenv("DISPLAY_ENABLE");
     if(disp && !strcmp(disp,"false"))g_display_on=false;
-    if(getenv("DETECT_STRIDE")){int v=atoi(getenv("DETECT_STRIDE"));if(v>=1&&v<=10)g_detect_stride=v;}
-    if(getenv("DETECT_SAMPLE_STEPS")){int v=atoi(getenv("DETECT_SAMPLE_STEPS"));if(v>=1&&v<=4)g_sample_steps=v;}
+    const char* http_env=getenv("HTTP_ENABLE");
+    if(http_env && !strcmp(http_env,"false"))g_http_on=false;
+    // 只要开预览或开录像，就得建 VENC 通道并起编码线程（网页可以单独关掉）
+    g_encode_on = g_display_on || recording_enabled;
+    if(getenv("DETECT_STRIDE")){
+        int v=atoi(getenv("DETECT_STRIDE"));
+        if(v>=1&&v<=10)g_detect_stride=v;
+    }
+    if(getenv("DETECT_SAMPLE_STEPS")){
+        int v=atoi(getenv("DETECT_SAMPLE_STEPS"));
+        if(v>=1&&v<=4)g_sample_steps=v;
+    }
     if(getenv("DETECT_ENABLE") && !strcmp(getenv("DETECT_ENABLE"),"false"))g_detect_on=false;
     if(getenv("DRAW_TEST_BOX") && !strcmp(getenv("DRAW_TEST_BOX"),"1"))g_draw_test_box=true;
+    if(getenv("OSD_ENABLE") && !strcmp(getenv("OSD_ENABLE"),"true"))g_osd_on=true;
+    if(getenv("OSD_SCALE")){
+        int v=atoi(getenv("OSD_SCALE"));
+        if(v>=1&&v<=3)g_osd_scale=v;
+    }
 
-    // ---- 阶段1：多目标筛选 + 卡尔曼 + 角度 + 串口 ----
-    // 全部参数来自 YAML（start.sh 转成环境变量）。非法值一律报错退出，
-    // 避免「悄悄用默认值」导致联调时数据算错却没人发现。
+    // ======================================================================
+    // 1. 参数：全部来自 config.yaml（start.sh 解析后转成环境变量）。
+    //    非法值一律报错退出，绝不"悄悄用默认值"——联调时算错却没人发现最要命。
+    // ======================================================================
     bool track_on=true, uart_on=false, inv_yaw=false, inv_pitch=false;
     float cam_fx=1024.0f, cam_fy=1024.0f, cam_cx=640.0f, cam_cy=360.0f;
     float opt_yaw=0.0f, opt_pitch=0.0f, target_dia=0.05f;
@@ -268,11 +436,15 @@ int main(int argc,char** argv){
     float kf_q=50.0f, kf_r=0.001f, kf_initpos=10.0f, kf_initvel=2.0f;
     unsigned sel_confirm=5, sel_lost=10, sel_maxcand=8;
     unsigned uart_baud=115200, uart_rate=50;
-    const char* uart_dev=getenv("UART_DEVICE"); if(!uart_dev||!*uart_dev)uart_dev="/dev/ttyS1";
+
+    const char* uart_dev=getenv("UART_DEVICE");
+    if(!uart_dev||!*uart_dev)uart_dev="/dev/ttyS1";
+
     // 串口帧格式：ascii = v1 文本帧（$GT,...，串口助手可直接看）；
     //             binary = v2 定长二进制帧（28 字节 A5 5A ... CRC16，见 uart_frame.h）
     // 默认 ascii，保证不配置时线上字节行为与之前完全一致。
-    const char* uart_format=getenv("UART_FORMAT"); if(!uart_format||!*uart_format)uart_format="ascii";
+    const char* uart_format=getenv("UART_FORMAT");
+    if(!uart_format||!*uart_format)uart_format="ascii";
     const bool uart_binary = !strcmp(uart_format,"binary");
     if(!uart_binary && strcmp(uart_format,"ascii")){
         fprintf(stderr,"Invalid UART_FORMAT '%s' (expect ascii|binary)\n",uart_format);
@@ -285,12 +457,18 @@ int main(int argc,char** argv){
         const char* rp=getenv("UART_RX_PRINT");
         if(rp&&*rp){
             if(!strcmp(rp,"false"))uart_rx_print=false;
-            else if(strcmp(rp,"true")){fprintf(stderr,"Invalid UART_RX_PRINT '%s' (expect true|false)\n",rp);return 2;}
+            else if(strcmp(rp,"true")){
+                fprintf(stderr,"Invalid UART_RX_PRINT '%s' (expect true|false)\n",rp);
+                return 2;
+            }
         }
         const char* rh=getenv("UART_RX_PRINT_HZ");
         if(rh&&*rh){
             const int v=atoi(rh);
-            if(v<1||v>100){fprintf(stderr,"Invalid UART_RX_PRINT_HZ '%s' (expect 1..100)\n",rh);return 2;}
+            if(v<1||v>100){
+                fprintf(stderr,"Invalid UART_RX_PRINT_HZ '%s' (expect 1..100)\n",rh);
+                return 2;
+            }
             uart_rx_hz=static_cast<unsigned>(v);
         }
     }
@@ -320,7 +498,10 @@ int main(int argc,char** argv){
         env_u32("SEL_MAX_CANDIDATES",8,1,32,sel_maxcand) &&
         env_u32("UART_BAUD",115200,1200,4000000,uart_baud) &&
         env_u32("UART_RATE_HZ",50,1,200,uart_rate);
-    if(!ok){fprintf(stderr,"Invalid track/uart parameter in environment (check config.yaml)\n");return 2;}
+    if(!ok){
+        fprintf(stderr,"Invalid track/uart parameter in environment (check config.yaml)\n");
+        return 2;
+    }
     g_track_on=track_on;
     g_max_candidates=static_cast<int>(sel_maxcand);
 
@@ -341,15 +522,110 @@ int main(int argc,char** argv){
         sel.max_candidates=static_cast<int>(sel_maxcand);
         sel.max_dist_deg=sel_maxdist;
         g_target.configure(calib,kf,sel,target_dia);
-        printf("TRACK calib fx=%.2f fy=%.2f cx=%.2f cy=%.2f opt=%.2f/%.2f inv=%d/%d "
+        DIAGF(gt::kDiagBoot, "TRACK calib fx=%.2f fy=%.2f cx=%.2f cy=%.2f opt=%.2f/%.2f inv=%d/%d "
                "confirm=%u lost=%u conf_w=%.2f aspect=%.2f dia=%.3fm aimup=%.2f\n",
                cam_fx,cam_fy,cam_cx,cam_cy,opt_yaw,opt_pitch,(int)inv_yaw,(int)inv_pitch,
                sel_confirm,sel_lost,sel_conf,sel_aspect,target_dia,aim_up);
     }
 
+    // ======================================================================
+    // 2. 飞行数据记录（T+ 预录触发）
+    //    触发源是电控 CMD=0x02 的 STATE 边沿（STATIC→FLIGHT 起飞 / FLIGHT→* 落地）。
+    //    视觉侧没有 IMU，所以 trigger 模式必须打开 uart_enable（只收不发也行）。
+    // ======================================================================
+    bool log_on=false, log_trigger=true, uart_tx=true, log_mcu_stream=false;
+    unsigned log_preroll=3000, log_postroll=2000, log_maxsec=30;
+    const char* log_dir=getenv("LOG_DIR"); if(!log_dir||!*log_dir)log_dir="logs";
+    const char* log_mode=getenv("LOG_MODE"); if(!log_mode||!*log_mode)log_mode="trigger";
+    if(strcmp(log_mode,"trigger") && strcmp(log_mode,"continuous")){
+        fprintf(stderr,"Invalid LOG_MODE '%s' (expect trigger|continuous)\n",log_mode);
+        return 2;
+    }
+    log_trigger = !strcmp(log_mode,"trigger");
+    if(!env_flag("LOG_ENABLE",false,log_on) ||
+       !env_flag("UART_TX_ENABLE",true,uart_tx) ||
+       !env_flag("LOG_MCU_STREAM",false,log_mcu_stream) ||
+       !env_u32("LOG_PREROLL_MS",3000,0,10000,log_preroll) ||
+       !env_u32("LOG_POSTROLL_MS",2000,0,10000,log_postroll) ||
+       !env_u32("LOG_MAX_SECONDS",30,1,300,log_maxsec)){
+        fprintf(stderr,"Invalid log parameter in environment (check config.yaml)\n");
+        return 2;
+    }
+    if(log_on && log_trigger && !uart_on){
+        fprintf(stderr,"log_mode=trigger requires uart_enable=true (needs MCU STATE edge); "
+                       "use log_mode=continuous to record without the MCU link\n");
+        return 2;
+    }
+
+    // ======================================================================
+    // 3. 诊断：分类打印开关 + 运行状态历史（自启动时唯一的"事后可见"通道）
+    // ======================================================================
+    {
+        bool master=true;
+        bool b_boot=true,b_isp=true,b_target=true,b_perf=true,b_uart=true,b_mcu=true,b_log=true,b_avi=true;
+        if(!env_flag("PRINT_ENABLE",true,master) ||
+           !env_flag("PRINT_BOOT",true,b_boot) ||
+           !env_flag("PRINT_ISP",true,b_isp) ||
+           !env_flag("PRINT_TARGET",true,b_target) ||
+           !env_flag("PRINT_PERF",true,b_perf) ||
+           !env_flag("PRINT_UART",true,b_uart) ||
+           !env_flag("PRINT_MCU",true,b_mcu) ||
+           !env_flag("PRINT_LOG",true,b_log) ||
+           !env_flag("PRINT_AVI",true,b_avi)){
+            fprintf(stderr,"Invalid print_* parameter in environment (expect true|false)\n");
+            return 2;
+        }
+        unsigned mask=0;
+        if(master){
+            if(b_boot)mask|=gt::kDiagBoot;
+            if(b_isp)mask|=gt::kDiagIsp;
+            if(b_target)mask|=gt::kDiagTarget;
+            if(b_perf)mask|=gt::kDiagPerf;
+            if(b_uart)mask|=gt::kDiagUart;
+            if(b_mcu)mask|=gt::kDiagMcu;
+            if(b_log)mask|=gt::kDiagLog;
+            if(b_avi)mask|=gt::kDiagAvi;
+        }
+        gt::diag_set_mask(mask);
+        const char* state_dir=getenv("STATE_DIR");
+        if(state_dir && *state_dir){
+            gt::diag_set_state_dir(state_dir);
+            gt::diag_install_crash_handlers();
+        }
+        gt::diag_state("start","print_mask=0x%X log=%d uart=%d dev=%s fmt=%s",
+                       mask,(int)log_on,(int)uart_on,uart_dev,uart_format);
+    }
+
     if(uart_on && !track_on){
         fprintf(stderr,"uart_enable requires track_enable (nothing to send otherwise)\n");
         return 2;
+    }
+
+    // ======================================================================
+    // 4. 启动外设：记录器 → 串口 → VI/ISP/VENC（顺序不能乱）
+    // ======================================================================
+    // 记录器先起：串口线程一启动就可能回调 on_mcu()，必须先就绪
+    if(log_on){
+        gt::LogCfg lc;
+        lc.enable=true;
+        lc.trigger_mode=log_trigger;
+        lc.mcu_stream=log_mcu_stream;   // 默认 false：frames.csv 单文件即成品表
+        lc.dir=log_dir;
+        lc.preroll_ms=static_cast<int>(log_preroll);
+        lc.postroll_ms=static_cast<int>(log_postroll);
+        lc.max_seconds=static_cast<int>(log_maxsec);
+        char mbuf[512];
+        snprintf(mbuf,sizeof(mbuf),"build=%s %s",__DATE__,__TIME__);
+        g_log.add_meta(mbuf);
+        snprintf(mbuf,sizeof(mbuf),
+                 "cfg uart_dev=%s fmt=%s rate=%uHz tx=%d track=%d detect=%d stride=%d steps=%d record=%d osd=%d",
+                 uart_dev,uart_format,uart_rate,(int)uart_tx,(int)track_on,(int)g_detect_on,
+                 g_detect_stride,g_sample_steps,(int)recording_enabled,(int)g_osd_on);
+        g_log.add_meta(mbuf);
+        if(!g_log.start(lc)){
+            fprintf(stderr,"LOG start failed: %s\n",g_log.last_error().c_str());
+            return 4;
+        }
     }
     if(uart_on){
         gt::UartCfg uc; uc.enable=true; uc.device=uart_dev;
@@ -357,6 +633,10 @@ int main(int argc,char** argv){
         uc.ascii=!uart_binary;   // false → 发 v2 二进制帧
         uc.rx_print=uart_rx_print;               // 收到电控帧就打印
         uc.rx_print_hz=static_cast<int>(uart_rx_hz);
+        uc.tx_enable=uart_tx;                    // false = 只收不发（纯记录模式）
+        if(g_log.running()){
+            g_uart.set_mcu_sink(&mcu_log_sink,&g_log);   // 必须在 start() 之前挂上
+        }
         if(!g_uart.start(uc)){
             // 串口是联调必需通道，打不开就明确报错退出，而不是静默降级后
             // 让电控「收不到数据」却查不出原因。需要纯视觉时把 uart_enable 设 false。
@@ -371,6 +651,9 @@ int main(int argc,char** argv){
         g_uart.publish(boot_state);
     }
 
+    // ======================================================================
+    // 5. 初始化成像链路：传感器模式 → sys/vi → VENC → 线程
+    // ======================================================================
     const char* exposure_mode=getenv("RECORD80_EXPOSURE_MODE");
     if(!exposure_mode)exposure_mode="manual";
     if(strcmp(exposure_mode,"auto") && strcmp(exposure_mode,"manual")){fprintf(stderr,"Invalid exposure mode\n");return 2;}
@@ -399,19 +682,28 @@ int main(int argc,char** argv){
         fprintf(stderr,"Invalid RECORD80 tuning value\n");return 2;
     }
     setvbuf(stdout,nullptr,_IOLBF,0);signal(SIGPIPE,SIG_IGN);
-    printf("FLY_LICHEERV camera_preview=true inference=disabled recording=%s\n",
+    DIAGF(gt::kDiagBoot, "FLY_LICHEERV camera_preview=true inference=disabled recording=%s\n",
            recording_enabled?"enabled":"disabled");
-    int server=socket(AF_INET,SOCK_STREAM,0);if(server<0)return 2;
+    // 网页服务开关：http_enable=false 时连 socket 都不建（否则端口仍在 LISTEN 却不 accept，
+    // 外面看起来像"没关干净"，实测过一次）
+    int server=-1;
+    if(g_http_on){
+    server=socket(AF_INET,SOCK_STREAM,0);if(server<0)return 2;
     int reuse=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&reuse,sizeof(reuse));
     sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(8081);
     const char*web_ip=getenv("WEB_IP_BIND")?getenv("WEB_IP_BIND"):argv[1];
     if(!strcmp(web_ip,"auto"))address.sin_addr.s_addr=INADDR_ANY;
     else if(inet_pton(AF_INET,web_ip,&address.sin_addr)!=1){perror("HTTP parse");close(server);return 2;}
     if(bind(server,reinterpret_cast<sockaddr*>(&address),sizeof(address)) || listen(server,4)){perror("HTTP bind");close(server);return 2;}
-    printf("WEB_BIND ip=%s\n",web_ip);
+    DIAGF(gt::kDiagBoot, "WEB_BIND ip=%s\n",web_ip);
+    }else{
+        DIAGF(gt::kDiagBoot, "WEB_SKIPPED (http_enable=false)\n");
+    }
+    // 只支持 80fps 一种模式（之前试过 60fps，寄存器表和时钟都对不上，已废弃）
+    const char* mode="80";
     setenv("MAIX_SENSOR_FPS",mode,1);
-    printf("sensor_mode=%s preview=1280x720 quality=%u preview_limiter=none exposure_mode=%s\n",mode,quality,exposure_mode);
-    printf("RECORD80_BLC_CONFIG mode=%s offsets=%u,%u,%u,%u\n",blc_mode,blc_r,blc_gr,blc_gb,blc_b);
+    DIAGF(gt::kDiagBoot, "sensor_mode=%s preview=1280x720 quality=%u preview_limiter=none exposure_mode=%s\n",mode,quality,exposure_mode);
+    DIAGF(gt::kDiagBoot, "RECORD80_BLC_CONFIG mode=%s offsets=%u,%u,%u,%u\n",blc_mode,blc_r,blc_gr,blc_gb,blc_b);
     SAMPLE_INI_CFG_S ini{};SAMPLE_VI_CONFIG_S cfg{};
     // 传感器模式：与 80fps 原版（camera_36record.cpp）完全一致的做法 ——
     // 无论 /mnt/data/sensor_cfg.ini 写的是什么，都在代码里覆盖为 720P_60FPS，
@@ -424,85 +716,162 @@ int main(int argc,char** argv){
     CVI_VI_SetDevNum(ini.devNum);
     if(SAMPLE_COMM_VI_IniToViCfg(&ini,&cfg)){close(server);return 3;}
     if(getenv("PREVIEW_DIAG_LINEAR"))cfg.astViInfo[0].stChnInfo.enCompressMode=COMPRESS_MODE_NONE;
-    printf("DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
-    printf("STEP sys_init begin\n");fflush(stdout);
+    DIAGF(gt::kDiagBoot, "DIAG configured_compress=%d\n",cfg.astViInfo[0].stChnInfo.enCompressMode);
+    DIAGF(gt::kDiagBoot, "STEP sys_init begin\n");fflush(stdout);
     SIZE_S size = mode_720p ? SIZE_S{1280,720} : SIZE_S{2560,1440};
-    printf("SENSOR_MODE %s size=%ux%u detect=%s display=%s\n",
+    DIAGF(gt::kDiagBoot, "SENSOR_MODE %s size=%ux%u detect=%s display=%s\n",
            mode_720p?"720P_60FPS":"4M_30FPS", size.u32Width, size.u32Height,
            g_detect_on?"on":"off", g_display_on?"on":"off");
     /* VB pool follows the VI channel size: production 720P mode is 1280x720. */
     int sys_rc = SAMPLE_PLAT_SYS_INIT(size);
-    printf("POOL_SIZE %ux%u sys_init_rc=%d\n", size.u32Width, size.u32Height, sys_rc);
+    DIAGF(gt::kDiagBoot, "POOL_SIZE %ux%u sys_init_rc=%d\n", size.u32Width, size.u32Height, sys_rc);
     fflush(stdout);
-    if(sys_rc){close(server);return 4;}
+    if(sys_rc){
+        close(server);
+        return 4;
+    }
     int vi_rc=SAMPLE_PLAT_VI_INIT(&cfg);
-    printf("STEP vi_init rc=%d\n",vi_rc);fflush(stdout);
-    if(vi_rc){SAMPLE_COMM_SYS_Exit();close(server);return 5;}
-    signal(SIGTERM,stop);signal(SIGINT,stop);signal(SIGPIPE,SIG_IGN);
-    VI_CHN_ATTR_S vi{};int rc=CVI_VI_GetChnAttr(0,0,&vi);vi.u32Depth=2;if(!rc)rc=CVI_VI_SetChnAttr(0,0,&vi);
-    VI_PIPE_ATTR_S pipe{};int prc=CVI_VI_GetPipeAttr(0,&pipe);
-    printf("DIAG channel_rc=%x compress=%d video=%d depth=%u pipe_rc=%x pipe_compress=%d\n",rc,vi.enCompressMode,vi.enVideoFormat,vi.u32Depth,prc,pipe.enCompressMode);
+    DIAGF(gt::kDiagBoot, "STEP vi_init rc=%d\n",vi_rc);
+    fflush(stdout);
+    if(vi_rc){
+        SAMPLE_COMM_SYS_Exit();
+        close(server);
+        return 5;
+    }
+
+    // 停止信号：start.sh 的 stop / 我们的孤儿保护都用 SIGTERM
+    signal(SIGTERM,stop);
+    signal(SIGINT,stop);
+    signal(SIGPIPE,SIG_IGN);
+
+    // VI 通道深度 = 2（两帧缓冲，保证 80fps 不丢帧）
+    VI_CHN_ATTR_S vi{};
+    int rc=CVI_VI_GetChnAttr(0,0,&vi);
+    vi.u32Depth=2;
+    if(!rc)rc=CVI_VI_SetChnAttr(0,0,&vi);
+    VI_PIPE_ATTR_S pipe{};
+    int prc=CVI_VI_GetPipeAttr(0,&pipe);
+    DIAGF(gt::kDiagBoot, "DIAG channel_rc=%x compress=%d video=%d depth=%u pipe_rc=%x pipe_compress=%d\n",rc,vi.enCompressMode,vi.enVideoFormat,vi.u32Depth,prc,pipe.enCompressMode);
+
+    // 硬件 JPEG 编码通道（display_enable=false 且 record_enable=false 时才不建）
     VENC_CHN_ATTR_S attr{};
     // JPEG single-frame mode has no MJPEG frame-rate-control field.
     attr.stVencAttr.enType=PT_JPEG;
     attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=size.u32Width;
     attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=size.u32Height;
-    attr.stVencAttr.u32BufSize=2*1024*1024;attr.stVencAttr.bByFrame=CVI_TRUE;
+    attr.stVencAttr.u32BufSize=2*1024*1024;
+    attr.stVencAttr.bByFrame=CVI_TRUE;
     attr.stVencAttr.stAttrJpege.bSupportDCF=CVI_FALSE;
     attr.stVencAttr.stAttrJpege.stMPFCfg.u8LargeThumbNailNum=0;
     attr.stVencAttr.stAttrJpege.enReceiveMode=VENC_PIC_RECEIVE_SINGLE;
     attr.stGopAttr.enGopMode=VENC_GOPMODE_NORMALP;
     bool created=false;
-    if(g_display_on){
-        if(!rc){rc=CVI_VENC_CreateChn(0,&attr);created=rc==0;printf("VENC CreateChn rc=0x%x\n",rc);}
-        if(!rc){VENC_JPEG_PARAM_S jpeg{};rc=CVI_VENC_GetJpegParam(0,&jpeg);if(!rc){jpeg.u32Qfactor=quality;rc=CVI_VENC_SetJpegParam(0,&jpeg);}printf("VENC JPEG quality=%u rc=0x%x\n",quality,rc);}
+    if(g_encode_on){
+        if(!rc){
+            rc=CVI_VENC_CreateChn(0,&attr);
+            created=rc==0;
+            DIAGF(gt::kDiagBoot, "VENC CreateChn rc=0x%x\n",rc);
+        }
+        if(!rc){
+            VENC_JPEG_PARAM_S jpeg{};
+            rc=CVI_VENC_GetJpegParam(0,&jpeg);
+            if(!rc){
+                jpeg.u32Qfactor=quality;
+                rc=CVI_VENC_SetJpegParam(0,&jpeg);
+            }
+            DIAGF(gt::kDiagBoot, "VENC JPEG quality=%u rc=0x%x\n",quality,rc);
+        }
         if(rc)running=0;
     }else{
-        printf("VENC skipped (display_enable=false)\n");
+        DIAGF(gt::kDiagBoot, "VENC skipped (display_enable=false && record_enable=false)\n");
     }
     std::thread server_thread;
     std::thread encoder_thread;
-    if(g_display_on){
+    if(g_http_on){
         server_thread=std::thread(http_server,server);
+    }else{
+        DIAGF(gt::kDiagBoot, "HTTP server skipped (http_enable=false)\n");
+    }
+    if(g_encode_on){
         encoder_thread=std::thread(encoder_worker);
     }
-    printf("CAMERA_READY display=%s preview=%s recorder=%s\n",
-           g_display_on?"on":"off", g_display_on?argv[1]:"none",
+    DIAGF(gt::kDiagBoot, "CAMERA_READY display=%s http=%s preview=%s recorder=%s\n",
+           g_display_on?"on":"off", g_http_on?"on":"off", g_encode_on?argv[1]:"none",
            recording_enabled?"on":"off");
-    unsigned long count=0,dups=0,timeouts=0;uint64_t firstpts=0,lastpts=0;
+    // 自启动最想知道的就是这一条：VI/ISP/VENC 全都起来了
+    gt::diag_state("ready","display=%d http=%d record=%d uart=%d log=%d temp=%dC web=%s",
+                   (int)g_display_on,(int)g_http_on,(int)recording_enabled,(int)g_uart.running(),
+                   (int)g_log.running(),gt::diag_cpu_temp_c(),
+                   g_http_on&&g_display_on?argv[1]:"off");
+    double last_beat_s=0;
+    // ======================================================================
+    // 6. 主循环：一帧一轮
+    //    取帧 → 抽点检测 → 筛选/卡尔曼/角度 → 画框 → 发串口 → 交编码 → 记一行
+    // ======================================================================
+    unsigned long count=0,dups=0,timeouts=0;
+    uint64_t firstpts=0,lastpts=0;
     double start=now(),first=0,last=0,report=start;
     bool diag_applied=false;
-    bool tuning_failed=false;bool blc_check_done=false;double last_ae_report=0;
-    unsigned long last_encoded=0,last_sent=0,last_bytes=0,last_frame_count=0;uint64_t last_window_pts=0;
+    bool tuning_failed=false;
+    bool blc_check_done=false;
+    double last_ae_report=0;
+    unsigned long last_encoded=0,last_sent=0,last_bytes=0,last_frame_count=0;
+    uint64_t last_window_pts=0;
     while(running){
         VIDEO_FRAME_INFO_S frame{};
-        if(CVI_VI_GetChnFrame(0,0,&frame,1000)){if(running)++timeouts;continue;}
+        if(CVI_VI_GetChnFrame(0,0,&frame,1000)){
+            if(running)++timeouts;
+            continue;
+        }
         // 取帧成功立刻建立帧元数据：帧号 + 原始 PTS + 采集时刻（不是曝光时刻）。
         // 后面所有异步环节（串口线程）只拿这份 POD 拷贝，绝不持有 VIDEO_FRAME_INFO_S。
         gt::FrameTiming timing{};
         timing.frame_id=++g_capture_frame_id;
         timing.vi_pts_raw=frame.stVFrame.u64PTS;
         timing.capture_mono_us=gt::monotonic_us();
+        // 电控快照必须在「取到帧的这一刻」读，不能等到检测之后：
+        // 检测要 5~20ms，那期间新到的电控帧会被算进"这一帧"，导致数据比画面新
+        // （实测过：检测后读比按时间戳重算新 0~9ms，中位 6ms）。这里固定住，
+        // 后面 OSD 和记录器都用这一份，语义才是「该帧时刻的电控状态」。
+        gt::McuState mcu_at_capture;
+        int mcu_age_now=-1;
+        gt::MonoUs mcu_rx_now=0;
+        // 一次加锁同时取快照+年龄+到达时刻，保证三者属于同一帧电控数据
+        const bool has_mcu= g_uart.mcu_snapshot(&mcu_at_capture,&mcu_age_now,&mcu_rx_now);
+        const gt::McuState* mcu_now= has_mcu ? &mcu_at_capture : nullptr;
         double t=now();
         if(!diag_applied && t-start>2){
             diag_applied=true;
             ISP_EXPOSURE_ATTR_S ae{};int ae_rc=CVI_ISP_GetExposureAttr(0,&ae);
-            printf("RECORD80_AE_BEFORE rc=0x%x mode=%d exp_min=%u exp_max=%u\n",ae_rc,ae.enOpType,ae.stAuto.stExpTimeRange.u32Min,ae.stAuto.stExpTimeRange.u32Max);
+            DIAGF(gt::kDiagIsp, "RECORD80_AE_BEFORE rc=0x%x mode=%d exp_min=%u exp_max=%u\n",ae_rc,ae.enOpType,ae.stAuto.stExpTimeRange.u32Min,ae.stAuto.stExpTimeRange.u32Max);
             if(!ae_rc && !strcmp(exposure_mode,"manual")){
                 ae.enOpType=OP_TYPE_MANUAL;ae.stManual.enGainType=AE_TYPE_GAIN;
                 ae.stManual.enExpTimeOpType=ae.stManual.enAGainOpType=ae.stManual.enDGainOpType=ae.stManual.enISPDGainOpType=OP_TYPE_MANUAL;
                 ae.stManual.u32ExpTime=manual_exp;ae.stManual.u32AGain=manual_again;
                 ae.stManual.u32DGain=manual_dgain;ae.stManual.u32ISPDGain=manual_ispgain;
                 ae_rc=CVI_ISP_SetExposureAttr(0,&ae);
-                printf("EXPOSURE_SET us=%u again=%u dgain=%u isp_gain=%u rc=%x\n",manual_exp,manual_again,manual_dgain,manual_ispgain,ae_rc);
+                DIAGF(gt::kDiagIsp, "EXPOSURE_SET us=%u again=%u dgain=%u isp_gain=%u rc=%x\n",manual_exp,manual_again,manual_dgain,manual_ispgain,ae_rc);
              }else if(!ae_rc && !strcmp(exposure_mode,"auto")){
                 ae.enOpType=OP_TYPE_AUTO;
-                if(auto_exp){ae.stAuto.stExpTimeRange.u32Max=auto_exp;if(ae.stAuto.stExpTimeRange.u32Min>auto_exp)ae.stAuto.stExpTimeRange.u32Min=auto_exp;}
-                if(auto_again){ae.stAuto.stAGainRange.u32Max=auto_again;if(ae.stAuto.stAGainRange.u32Min>auto_again)ae.stAuto.stAGainRange.u32Min=auto_again;}
-                if(auto_dgain){ae.stAuto.stDGainRange.u32Max=auto_dgain;if(ae.stAuto.stDGainRange.u32Min>auto_dgain)ae.stAuto.stDGainRange.u32Min=auto_dgain;}
-                if(auto_ispgain){ae.stAuto.stISPDGainRange.u32Max=auto_ispgain;if(ae.stAuto.stISPDGainRange.u32Min>auto_ispgain)ae.stAuto.stISPDGainRange.u32Min=auto_ispgain;}
+                // 自动模式下把上限收紧：0 = 保持 ISP 默认上限
+                if(auto_exp){
+                    ae.stAuto.stExpTimeRange.u32Max=auto_exp;
+                    if(ae.stAuto.stExpTimeRange.u32Min>auto_exp)ae.stAuto.stExpTimeRange.u32Min=auto_exp;
+                }
+                if(auto_again){
+                    ae.stAuto.stAGainRange.u32Max=auto_again;
+                    if(ae.stAuto.stAGainRange.u32Min>auto_again)ae.stAuto.stAGainRange.u32Min=auto_again;
+                }
+                if(auto_dgain){
+                    ae.stAuto.stDGainRange.u32Max=auto_dgain;
+                    if(ae.stAuto.stDGainRange.u32Min>auto_dgain)ae.stAuto.stDGainRange.u32Min=auto_dgain;
+                }
+                if(auto_ispgain){
+                    ae.stAuto.stISPDGainRange.u32Max=auto_ispgain;
+                    if(ae.stAuto.stISPDGainRange.u32Min>auto_ispgain)ae.stAuto.stISPDGainRange.u32Min=auto_ispgain;
+                }
                 ae_rc=CVI_ISP_SetExposureAttr(0,&ae);
-                printf("RECORD80_AE_AUTO_LIMIT exp_max=%u again_max=%u dgain_max=%u isp_gain_max=%u rc=0x%x\n",auto_exp,auto_again,auto_dgain,auto_ispgain,ae_rc);
+                DIAGF(gt::kDiagIsp, "RECORD80_AE_AUTO_LIMIT exp_max=%u again_max=%u dgain_max=%u isp_gain_max=%u rc=0x%x\n",auto_exp,auto_again,auto_dgain,auto_ispgain,ae_rc);
             }
             if(ae_rc){
                 tuning_failed=true;running=0;
@@ -522,31 +891,86 @@ int main(int argc,char** argv){
                         readback.stManual.OffsetR==blc_r && readback.stManual.OffsetGr==blc_gr &&
                         readback.stManual.OffsetGb==blc_gb && readback.stManual.OffsetB==blc_b;
                 }
-                printf("RECORD80_BLC_SET offsets=%u,%u,%u,%u rc=0x%x readback_match=%d\n",blc_r,blc_gr,blc_gb,blc_b,be,match);
+                DIAGF(gt::kDiagIsp, "RECORD80_BLC_SET offsets=%u,%u,%u,%u rc=0x%x readback_match=%d\n",blc_r,blc_gr,blc_gb,blc_b,be,match);
                 if(be || !match){tuning_failed=true;running=0;}
             }
-            ISP_PUB_ATTR_S pub{};int pe=CVI_ISP_GetPubAttr(0,&pub);printf("DIAG ISP pub fps=%f get=%x\n",pub.f32FrameRate,pe);
-            if(!pe && getenv("PREVIEW_DIAG_PUBFPS")){pub.f32FrameRate=atof(getenv("PREVIEW_DIAG_PUBFPS"));printf("DIAG set ISP pub fps=%f rc=%x\n",pub.f32FrameRate,CVI_ISP_SetPubAttr(0,&pub));}
-            if(getenv("PREVIEW_DIAG_NOTNR")){ISP_TNR_ATTR_S a{};int e=CVI_ISP_GetTNRAttr(0,&a);printf("DIAG TNR enabled=%d get=%x\n",a.Enable,e);if(!e){a.Enable=CVI_FALSE;printf("DIAG disable TNR=%x\n",CVI_ISP_SetTNRAttr(0,&a));}}
-            if(getenv("PREVIEW_DIAG_NODPC")){ISP_DP_DYNAMIC_ATTR_S a{};ISP_DP_STATIC_ATTR_S b{};int e=CVI_ISP_GetDPDynamicAttr(0,&a);printf("DIAG DPC dynamic=%d get=%x\n",a.Enable,e);if(!e){a.Enable=CVI_FALSE;printf("DIAG disable dynamicDPC=%x\n",CVI_ISP_SetDPDynamicAttr(0,&a));}e=CVI_ISP_GetDPStaticAttr(0,&b);printf("DIAG DPC static=%d get=%x\n",b.Enable,e);if(!e){b.Enable=CVI_FALSE;printf("DIAG disable staticDPC=%x\n",CVI_ISP_SetDPStaticAttr(0,&b));}}
+            // 三个只在排查 ISP 问题时才用的调试开关（默认不设 = 不执行）
+            ISP_PUB_ATTR_S pub{};
+            int pe=CVI_ISP_GetPubAttr(0,&pub);
+            DIAGF(gt::kDiagIsp, "DIAG ISP pub fps=%f get=%x\n",pub.f32FrameRate,pe);
+            if(!pe && getenv("PREVIEW_DIAG_PUBFPS")){
+                pub.f32FrameRate=atof(getenv("PREVIEW_DIAG_PUBFPS"));
+                DIAGF(gt::kDiagIsp, "DIAG set ISP pub fps=%f rc=%x\n",pub.f32FrameRate,CVI_ISP_SetPubAttr(0,&pub));
+            }
+            if(getenv("PREVIEW_DIAG_NOTNR")){
+                ISP_TNR_ATTR_S a{};
+                int e=CVI_ISP_GetTNRAttr(0,&a);
+                DIAGF(gt::kDiagIsp, "DIAG TNR enabled=%d get=%x\n",a.Enable,e);
+                if(!e){
+                    a.Enable=CVI_FALSE;
+                    DIAGF(gt::kDiagIsp, "DIAG disable TNR=%x\n",CVI_ISP_SetTNRAttr(0,&a));
+                }
+            }
+            if(getenv("PREVIEW_DIAG_NODPC")){
+                ISP_DP_DYNAMIC_ATTR_S a{};
+                ISP_DP_STATIC_ATTR_S b{};
+                int e=CVI_ISP_GetDPDynamicAttr(0,&a);
+                DIAGF(gt::kDiagIsp, "DIAG DPC dynamic=%d get=%x\n",a.Enable,e);
+                if(!e){
+                    a.Enable=CVI_FALSE;
+                    DIAGF(gt::kDiagIsp, "DIAG disable dynamicDPC=%x\n",CVI_ISP_SetDPDynamicAttr(0,&a));
+                }
+                e=CVI_ISP_GetDPStaticAttr(0,&b);
+                DIAGF(gt::kDiagIsp, "DIAG DPC static=%d get=%x\n",b.Enable,e);
+                if(!e){
+                    b.Enable=CVI_FALSE;
+                    DIAGF(gt::kDiagIsp, "DIAG disable staticDPC=%x\n",CVI_ISP_SetDPStaticAttr(0,&b));
+                }
+            }
         }
+        // 每 5 秒回读一次实际曝光（确认"设下去的值"真的生效了）
         if(t-last_ae_report>=5){
-            last_ae_report=t;ISP_EXP_INFO_S exp{};int e=CVI_ISP_QueryExposureInfo(0,&exp);
-            printf("RECORD80_AE_INFO elapsed_s=%.2f rc=0x%x exp_us=%u again=%u dgain=%u isp_gain=%u luma=%u\n",t-start,e,exp.u32ExpTime,exp.u32AGain,exp.u32DGain,exp.u32ISPDGain,exp.u8AveLum);
+            last_ae_report=t;
+            ISP_EXP_INFO_S exp{};
+            int e=CVI_ISP_QueryExposureInfo(0,&exp);
+            DIAGF(gt::kDiagIsp,
+                  "RECORD80_AE_INFO elapsed_s=%.2f rc=0x%x exp_us=%u again=%u dgain=%u isp_gain=%u luma=%u\n",
+                  t-start,e,exp.u32ExpTime,exp.u32AGain,exp.u32DGain,exp.u32ISPDGain,exp.u8AveLum);
         }
         if(!blc_check_done && !strcmp(blc_mode,"manual") && t-start>10){
-            blc_check_done=true;ISP_INNER_STATE_INFO_S inner{};
+            blc_check_done=true;
+            ISP_INNER_STATE_INFO_S inner{};
             int be=CVI_ISP_QueryInnerStateInfo(0,&inner);
             bool match=!be && inner.blcOffsetR==blc_r && inner.blcOffsetGr==blc_gr &&
                 inner.blcOffsetGb==blc_gb && inner.blcOffsetB==blc_b;
-            printf("RECORD80_BLC_VERIFY elapsed_s=%.2f rc=0x%x offsets=%u,%u,%u,%u match=%d\n",t-start,be,inner.blcOffsetR,inner.blcOffsetGr,inner.blcOffsetGb,inner.blcOffsetB,match);
+            DIAGF(gt::kDiagIsp, "RECORD80_BLC_VERIFY elapsed_s=%.2f rc=0x%x offsets=%u,%u,%u,%u match=%d\n",t-start,be,inner.blcOffsetR,inner.blcOffsetGr,inner.blcOffsetGb,inner.blcOffsetB,match);
             if(!match){tuning_failed=true;running=0;}
         }
-        if(t-start<4){CVI_VI_ReleaseChnFrame(0,0,&frame);continue;}
-        if(!count){first=t;firstpts=frame.stVFrame.u64PTS;printf("VI geometry=%ux%u stride=%u,%u format=%d compress=%d video=%d lengths=%u,%u,%u\n",frame.stVFrame.u32Width,frame.stVFrame.u32Height,frame.stVFrame.u32Stride[0],frame.stVFrame.u32Stride[1],frame.stVFrame.enPixelFormat,frame.stVFrame.enCompressMode,frame.stVFrame.enVideoFormat,frame.stVFrame.u32Length[0],frame.stVFrame.u32Length[1],frame.stVFrame.u32Length[2]);}
+        // 前 4 秒是 ISP 预热，这段时间的帧直接归还
+        if(t-start<4){
+            CVI_VI_ReleaseChnFrame(0,0,&frame);
+            continue;
+        }
+        if(!count){
+            first=t;
+            firstpts=frame.stVFrame.u64PTS;
+            DIAGF(gt::kDiagBoot,
+                  "VI geometry=%ux%u stride=%u,%u format=%d compress=%d video=%d lengths=%u,%u,%u\n",
+                  frame.stVFrame.u32Width,frame.stVFrame.u32Height,
+                  frame.stVFrame.u32Stride[0],frame.stVFrame.u32Stride[1],
+                  frame.stVFrame.enPixelFormat,frame.stVFrame.enCompressMode,
+                  frame.stVFrame.enVideoFormat,
+                  frame.stVFrame.u32Length[0],frame.stVFrame.u32Length[1],frame.stVFrame.u32Length[2]);
+        }
         else if(frame.stVFrame.u64PTS<=lastpts)++dups;
-        last=t;lastpts=frame.stVFrame.u64PTS;++count;
+        last=t;
+        lastpts=frame.stVFrame.u64PTS;
+        ++count;
+        // OSD 要用的目标结果（tgt 只在检测分支里有效，复制三个标量出来）
+        bool osd_det=false;
+        float osd_yaw=0.0f, osd_pitch=0.0f;
         {
+            bool logged_row=false;   // 本帧是否已经写过记录行（每帧一行，跑没跑检测都写）
             // ---- 绿色圆灯检测（每帧，抽点 4 → 320x180 网格）----
             // 说明：VI 帧为 NV12（UV 交织）。抽点 Y 与 UV，步长 4；
             //       U/V 顺序对绿色判据无影响（两者都要求 < 128）。
@@ -608,22 +1032,36 @@ int main(int argc,char** argv){
                 // ---- ③ 多目标筛选 + 卡尔曼 + 角度换算 ----
                 const gt::TargetOut& tgt=g_target.update(cands,ncand,S,dt,t_now*1000.0);
                 timing.detect_end_us=gt::monotonic_us();
+                osd_det=tgt.detected;
+                osd_yaw=tgt.yaw_deg;
+                osd_pitch=tgt.pitch_deg;
                 track_total_ms+=(now()-td1)*1000.0;
                 // ---- ④ 把选中目标的框叠加到 Y 平面（编码前，网页与录像都能看到）----
                 // 纯亮度写入，不涉及色彩转换；框宽 3px，最小半径 12px 保证远处可见。
                 if(g_display_on && tgt.has_box){
                     int cxp=(int)(tgt.gx*S), cyp=(int)(tgt.gy*S);
-                    int rp=(int)(tgt.gr*S)+6; if(rp<12)rp=12;
+                    int rp=(int)(tgt.gr*S)+6;
+                    if(rp<12)rp=12;          // 远处目标的最小框，保证肉眼可见
                     int x0=cxp-rp, x1=cxp+rp, y0=cyp-rp, y1=cyp+rp;
-                    if(x0<0)x0=0; if(y0<0)y0=0;
-                    if(x1>(int)W-2)x1=(int)W-2; if(y1>(int)H-2)y1=(int)H-2;
+                    if(x0<0)x0=0;
+                    if(y0<0)y0=0;
+                    if(x1>(int)W-2)x1=(int)W-2;
+                    if(y1>(int)H-2)y1=(int)H-2;
                     unsigned char*Yw=(unsigned char*)Yp;
                     for(int t=0;t<3;++t){
                         int ya=y0+t, yb=y1-t, xa=x0+t, xb=x1-t;
-                        if(ya>=0&&ya<(int)H)for(int x=x0;x<=x1;++x)Yw[(size_t)ya*ystride+x]=255;
-                        if(yb>=0&&yb<(int)H)for(int x=x0;x<=x1;++x)Yw[(size_t)yb*ystride+x]=255;
-                        if(xa>=0&&xa<(int)W)for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xa]=255;
-                        if(xb>=0&&xb<(int)W)for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xb]=255;
+                        if(ya>=0&&ya<(int)H){
+                            for(int x=x0;x<=x1;++x)Yw[(size_t)ya*ystride+x]=255;
+                        }
+                        if(yb>=0&&yb<(int)H){
+                            for(int x=x0;x<=x1;++x)Yw[(size_t)yb*ystride+x]=255;
+                        }
+                        if(xa>=0&&xa<(int)W){
+                            for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xa]=255;
+                        }
+                        if(xb>=0&&xb<(int)W){
+                            for(int y=y0;y<=y1;++y)Yw[(size_t)y*ystride+xb]=255;
+                        }
                     }
                     // 缓存映射下必须把脏行写回 DRAM，硬件 JPEG 才能看到框
                     CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw, frame.stVFrame.u32Stride[0]*H);
@@ -636,10 +1074,12 @@ int main(int argc,char** argv){
                         int ya=by0+t, yb=by1-t, xa=bx0+t, xb=bx1-t;
                         for(int x=bx0;x<=bx1;++x){
                             if(ya<(int)H)Yw[(size_t)ya*ystride+x]=255;
-                            if(yb>=0)Yw[(size_t)yb*ystride+x]=255;}
+                            if(yb>=0)Yw[(size_t)yb*ystride+x]=255;
+                        }
                         for(int y=by0;y<=by1;++y){
                             if(xa<(int)W)Yw[(size_t)y*ystride+xa]=255;
-                            if(xb>=0)Yw[(size_t)y*ystride+xb]=255;}
+                            if(xb>=0)Yw[(size_t)y*ystride+xb]=255;
+                        }
                     }
                     CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw, frame.stVFrame.u32Stride[0]*H);
                 }
@@ -651,7 +1091,7 @@ int main(int argc,char** argv){
                     const gt::MonoUs log_now=gt::monotonic_us();
                     if(log_now-g_last_target_log_us>=100000){
                         g_last_target_log_us=log_now;
-                        printf("GREEN_TARGET state=%s yaw=%.2f pitch=%.2f vyaw=%.2f vpitch=%.2f "
+                        DIAGF(gt::kDiagTarget, "GREEN_TARGET state=%s yaw=%.2f pitch=%.2f vyaw=%.2f vpitch=%.2f "
                                "dist=%.3f%s age=%.1fms cand=%d px=%.1f,%.1f r=%.1f "
                                "lyaw=%.2f lpitch=%.2f hits=%lu frame=%u\n",
                                target_state_name(tgt.state),tgt.yaw_deg,tgt.pitch_deg,
@@ -667,64 +1107,252 @@ int main(int argc,char** argv){
                 g_uart.publish(tgt,timing);
                 g_last_pub_capture_us=timing.capture_mono_us;
                 g_last_pub_frame_id=timing.frame_id;
+                // 一帧一行：在采集线程里、结果刚算完时入队（只做 snprintf+memcpy）
+                if(g_log.running()){
+                    // 用「取帧那一刻」的快照（不是检测完之后再读）
+                    g_log.on_frame(timing,tgt,1,S,mcu_now,mcu_age_now,mcu_rx_now);
+                    logged_row=true;
+                }
                 const double det_ms=(now()-td0)*1000.0;
-                det_total_ms+=det_ms; if(det_ms>g_det_max_ms)g_det_max_ms=det_ms;
+                det_total_ms+=det_ms;
+                if(det_ms>g_det_max_ms)g_det_max_ms=det_ms;
                 const double proc_ms=timing.detect_duration_us()/1000.0;
-                g_proc_total_ms+=proc_ms; if(proc_ms>g_proc_max_ms)g_proc_max_ms=proc_ms;
+                g_proc_total_ms+=proc_ms;
+                if(proc_ms>g_proc_max_ms)g_proc_max_ms=proc_ms;
                 const double lat_ms=timing.capture_latency_us()/1000.0;
-                g_lat_total_ms+=lat_ms; if(lat_ms>g_lat_max_ms)g_lat_max_ms=lat_ms;
+                g_lat_total_ms+=lat_ms;
+                if(lat_ms>g_lat_max_ms)g_lat_max_ms=lat_ms;
                 ++det_count;
                 if(green_frames%300==0){
-                    printf("GREEN_STAT frames=%lu hits=%lu rate=%.1f%%\n",
+                    DIAGF(gt::kDiagTarget, "GREEN_STAT frames=%lu hits=%lu rate=%.1f%%\n",
                            green_frames,green_hits,100.0*green_hits/(green_frames?green_frames:1));
                 }
             }
-            if(g_display_on){
+            // ---- ④b OSD：把「这一帧采集时」的电控状态烧进画面左上角 ----
+            // 必须在交给编码线程之前画：编码线程拿到的是已编码的 JPEG，改不了像素。
+            // 因为画的是"帧自己那一份快照"，编码线程丢帧也不会让画面和数据错位。
+            if(g_osd_on && g_display_on && frame.stVFrame.pu8VirAddr[0]!=nullptr){
+                unsigned char*Yw=(unsigned char*)frame.stVFrame.pu8VirAddr[0];
+                const unsigned ys=frame.stVFrame.u32Stride[0];
+                const int ow=(int)W, oh=(int)H;
+                const gt::McuState* m=mcu_now;
+                const int mage=mcu_age_now;
+                char l1[64],l2[64],l3[64],l4[64];
+                if(m!=nullptr){
+                    snprintf(l1,sizeof l1,"F%05u %s SEQ%03u AG%03dMS%s",
+                             timing.frame_id,mcu_state_txt(m->state),
+                             (unsigned)(m->seq&0xFF),mage,
+                             m->imu_valid()?"":" IMU!");
+                    snprintf(l2,sizeof l2,"GX%6.2f GY%6.2f GZ%6.2f",
+                             m->gx,m->gy,m->gz);
+                    snprintf(l3,sizeof l3,"R%6.1f P%6.1f Y%6.1f",
+                             m->roll,m->pitch,m->yaw);
+                }else{
+                    snprintf(l1,sizeof l1,"F%05u MCU NO-DATA (UART?)",timing.frame_id);
+                    l2[0]=0;
+                    l3[0]=0;
+                }
+                snprintf(l4,sizeof l4,"TGT Y%6.1f P%5.1f %s",
+                         osd_det?osd_yaw:0.0f,osd_det?osd_pitch:0.0f,
+                         osd_det?"":"NO-TGT");
+
+                const int sc=g_osd_scale;
+                const int line_h=(gt::osd::kFontH+2)*sc;
+                int box_w=0;
+                const char* lines[4]={l1,l2,l3,l4};
+                for(int i=0;i<4;i++){
+                    const int tw=gt::osd::text_width(lines[i],sc);
+                    if(tw>box_w)box_w=tw;
+                }
+                box_w+=8;
+                const int box_h=line_h*4+6;
+                gt::osd::fill_rect(Yw,(int)ys,ow,oh,2,2,box_w,box_h,16);   // 半透明做不了，铺近黑底
+                for(int i=0;i<4;i++){
+                    gt::osd::draw_text(Yw,(int)ys,ow,oh,6,4+i*line_h,sc,lines[i]);
+                }
+                // 缓存映射下必须写回，硬件 JPEG 才能看到（与画框同理）
+                CVI_SYS_IonFlushCache(frame.stVFrame.u64PhyAddr[0],(CVI_VOID*)Yw,
+                                      frame.stVFrame.u32Stride[0]*H);
+            }
+            if(g_encode_on){
                 std::lock_guard<std::mutex> guard(input_mutex);
-                if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);++preview_replaced;}
-                pending=frame;has_pending=true;
+                if(has_pending){
+                    CVI_VI_ReleaseChnFrame(0,0,&pending);
+                    ++preview_replaced;
+                }
+                pending=frame;
+                has_pending=true;
+                // 编码线程靠这两个字段写视频侧车（AVI 帧号 → 相机帧号）
+                pending_frame_id=timing.frame_id;
+                pending_capture_us=timing.capture_mono_us;
             }else{
                 CVI_VI_ReleaseChnFrame(0,0,&frame);   // 无消费者，直接归还
             }
+            // 这一帧没跑检测（detect 关闭 / stride 跳过 / 尺寸不匹配）：仍然记一行时间戳，
+            // 保证 frames.csv 与相机帧号能一一对应，缺口由 frame_id 跳号暴露
+            if(g_log.running() && !logged_row){
+                g_log.on_frame(timing,gt::TargetOut(),0,0,mcu_now,mcu_age_now,mcu_rx_now);
+            }
         }
+        // ------------------------------------------------------------------
+        // 每 5 秒一次的性能统计。每行一个指标组，字段含义见 docs/DIAGNOSTICS.md
+        // ------------------------------------------------------------------
         if(t-report>=5 && count>1){
             unsigned long enc=encoded.load(),sent=network_sent.load(),bytes=network_bytes.load();
-            printf("capture_frames=%lu host_fps=%.4f pts_fps=%.4f duplicate_pts=%lu timeouts=%lu encoded=%lu encode_errors=%lu encode_fps=%.3f sent_fps=%.3f jpeg_mbit_s=%.3f preview_replaced=%lu\n",count,(count-1)/(last-first),lastpts>firstpts?(count-1)*1e6/(lastpts-firstpts):0,dups,timeouts,enc,errors.load(),(enc-last_encoded)/(t-report),(sent-last_sent)/(t-report),(bytes-last_bytes)*8e-6/(t-report),preview_replaced.load());
-            if(det_count){printf("DETECT avg_ms=%.3f max_ms=%.3f proc_avg_ms=%.3f proc_max_ms=%.3f lat_avg_ms=%.3f lat_max_ms=%.3f calls=%lu stride=%d map_miss=%lu sample_ms=%.3f track_ms=%.3f ns=%d cand_max=%d\n",det_total_ms/det_count,g_det_max_ms,g_proc_total_ms/det_count,g_proc_max_ms,g_lat_total_ms/det_count,g_lat_max_ms,det_count,g_detect_stride,g_map_miss,samp_total_ms/det_count,track_total_ms/det_count,g_sample_steps,g_max_candidates);det_total_ms=0;det_count=0;samp_total_ms=0;track_total_ms=0;g_det_max_ms=0;g_proc_total_ms=0;g_proc_max_ms=0;g_lat_total_ms=0;g_lat_max_ms=0;}
+
+            // 采集 / 编码 / 网络
+            DIAGF(gt::kDiagPerf,
+                  "capture_frames=%lu host_fps=%.4f pts_fps=%.4f duplicate_pts=%lu timeouts=%lu "
+                  "encoded=%lu encode_errors=%lu encode_fps=%.3f sent_fps=%.3f jpeg_mbit_s=%.3f "
+                  "preview_replaced=%lu\n",
+                  count,
+                  (count-1)/(last-first),
+                  lastpts>firstpts?(count-1)*1e6/(lastpts-firstpts):0,
+                  dups,
+                  timeouts,
+                  enc,
+                  errors.load(),
+                  (enc-last_encoded)/(t-report),
+                  (sent-last_sent)/(t-report),
+                  (bytes-last_bytes)*8e-6/(t-report),
+                  preview_replaced.load());
+
+            // 检测耗时；打印完把窗口统计清零
+            if(det_count){
+                DIAGF(gt::kDiagPerf,
+                      "DETECT avg_ms=%.3f max_ms=%.3f proc_avg_ms=%.3f proc_max_ms=%.3f "
+                      "lat_avg_ms=%.3f lat_max_ms=%.3f calls=%lu stride=%d map_miss=%lu "
+                      "sample_ms=%.3f track_ms=%.3f ns=%d cand_max=%d\n",
+                      det_total_ms/det_count,
+                      g_det_max_ms,
+                      g_proc_total_ms/det_count,
+                      g_proc_max_ms,
+                      g_lat_total_ms/det_count,
+                      g_lat_max_ms,
+                      det_count,
+                      g_detect_stride,
+                      g_map_miss,
+                      samp_total_ms/det_count,
+                      track_total_ms/det_count,
+                      g_sample_steps,
+                      g_max_candidates);
+                det_total_ms=0;
+                det_count=0;
+                samp_total_ms=0;
+                track_total_ms=0;
+                g_det_max_ms=0;
+                g_proc_total_ms=0;
+                g_proc_max_ms=0;
+                g_lat_total_ms=0;
+                g_lat_max_ms=0;
+            }
+
+            // 串口发送与接收
             if(g_uart.running()){
                 const unsigned long us=g_uart.sent_frames();
-                printf("UART sent=%lu rate=%.2fHz errors=%lu | rx_frames=%lu rx_crc=%lu rx_other=%lu rx_age=%dms\n",
+                DIAGF(gt::kDiagUart, "UART sent=%lu rate=%.2fHz errors=%lu | rx_frames=%lu rx_crc=%lu rx_other=%lu rx_age=%dms\n",
                        us,(us-g_uart_sent_prev)/(t-report),g_uart.send_errors(),
                        g_uart.rx_frames(),g_uart.rx_crc_errors(),g_uart.rx_other_frames(),g_uart.mcu_age_ms());
                 g_uart_sent_prev=us;
             }
+
+            // 飞行记录器
+            if(g_log.running()){
+                const gt::LogStats ls=g_log.stats();
+                DIAGF(gt::kDiagLog, "LOG sessions=%lu open=%d triggers=%lu rows_frames=%lu rows_mcu=%lu video=%lu dropped=%lu last=%dms\n",
+                       ls.sessions,ls.open,ls.triggers,ls.rows_frames,ls.rows_mcu,ls.rows_video,
+                       ls.dropped,ls.last_session_ms);
+            }
+
             {
                 // 帧时间戳：相机帧号、最近发布帧的年龄、串口「取帧→开始写」年龄
                 // （后者只做诊断，不写进 ASCII 的 age 字段）
                 const gt::WriteStartAgeStats as=g_uart.take_write_start_age_stats();
                 const double cap_age_ms=g_last_pub_capture_us?static_cast<double>(gt::monotonic_us()-g_last_pub_capture_us)/1000.0:-1.0;
-                printf("TIMING last_frame_id=%u last_pub_frame_id=%u last_capture_age_ms=%.1f "
+                DIAGF(gt::kDiagPerf, "TIMING last_frame_id=%u last_pub_frame_id=%u last_capture_age_ms=%.1f "
                        "uart_write_start_age_last=%d uart_write_start_age_avg=%.2f "
                        "uart_write_start_age_max=%d uart_write_start_age_n=%lu\n",
                        g_capture_frame_id,g_last_pub_frame_id,cap_age_ms,as.last_ms,as.avg_ms,as.max_ms,as.samples);
                 // 原始 PTS 只记录：板端实测单位是微秒（80fps 时每帧差≈12500），但代码不做换算，
                 // 只用于观察单调性/重复；换传感器或驱动后需重新确认。
                 const uint64_t win_delta=last_window_pts?(lastpts-last_window_pts):0;
-                printf("PTS_STAT last_raw=%llu window_delta_raw=%llu per_frame_raw=%.1f duplicate_pts=%lu\n",
+                DIAGF(gt::kDiagPerf, "PTS_STAT last_raw=%llu window_delta_raw=%llu per_frame_raw=%.1f duplicate_pts=%lu\n",
                        static_cast<unsigned long long>(lastpts),static_cast<unsigned long long>(win_delta),
                        (count>last_frame_count)?static_cast<double>(win_delta)/static_cast<double>(count-last_frame_count):0.0,dups);
             }
-            double wfps=(count-last_frame_count)/(t-report);double wpts=(last_window_pts&&lastpts>last_window_pts)?(count-last_frame_count)*1000000.0/(lastpts-last_window_pts):0;printf("CLOCK36_WINDOW elapsed_s=%.2f frames=%lu host_fps=%.4f pts_fps=%.4f\n",t-start,count-last_frame_count,wfps,wpts);last_frame_count=count;last_window_pts=lastpts;last_encoded=enc;last_sent=sent;last_bytes=bytes;report=t;
+
+            // 本窗口的实际帧率（host 侧 / 按 PTS 推算）
+            double wfps=(count-last_frame_count)/(t-report);
+            double wpts=(last_window_pts&&lastpts>last_window_pts)?(count-last_frame_count)*1000000.0/(lastpts-last_window_pts):0;
+            DIAGF(gt::kDiagPerf, "CLOCK36_WINDOW elapsed_s=%.2f frames=%lu host_fps=%.4f pts_fps=%.4f\n",
+                   t-start,count-last_frame_count,wfps,wpts);
+
+            // 窗口基准推进
+            last_frame_count=count;
+            last_window_pts=lastpts;
+            last_encoded=enc;
+            last_sent=sent;
+            last_bytes=bytes;
+            report=t;
+        }
+        // 健康行 1 Hz：答「这一场为什么没记到」——板子活着吗、电控在发帧吗
+        if(g_log.running() && (g_last_health_s<0.0 || t-g_last_health_s>=1.0)){
+            g_last_health_s=t;
+            g_log.on_health((count>1&&last>first)?(count-1)/(last-first):0.0,count,
+                            encoded.load(),g_uart.rx_frames(),g_uart.mcu_age_ms());
+        }
+        // 运行状态心跳 30 秒一条：进程若被 kill/掉电，run_history 里最后一条就是"活到哪一刻"
+        if(t-last_beat_s>=30.0){
+            last_beat_s=t;
+            const int temp_c=gt::diag_cpu_temp_c();
+            gt::diag_progress(count,encoded.load(),temp_c);
+            gt::diag_state("alive","frames=%lu fps=%.2f encoded=%lu temp=%dC mcu_age=%dms log_open=%d",
+                           count,(count>1&&last>first)?(count-1)/(last-first):0.0,
+                           encoded.load(),temp_c,g_uart.mcu_age_ms(),
+                           g_log.running()?(int)g_log.stats().open:-1);
         }
     }
+    // ======================================================================
+    // 7. 收尾：顺序有讲究——先停生产者（编码线程/串口），再停消费者（记录器、HTTP），
+    //    最后才拆 VI/ISP，否则会出现"往已销毁的通道写帧"。
+    // ======================================================================
     if(encoder_thread.joinable())encoder_thread.join();
-    g_uart.stop();   // 先停串口，避免退出过程中继续往 tty 写
+    g_uart.stop();                       // 串口线程会往 tty 写，必须先停
     if(recording_enabled && !avi.finish())recording_failed=1;
-    {std::lock_guard<std::mutex> guard(input_mutex);if(has_pending){CVI_VI_ReleaseChnFrame(0,0,&pending);has_pending=false;}}
+    g_log.stop();                        // 记录器最后停：把缓冲里剩下的行写完并收尾 meta.txt
+    {
+        std::lock_guard<std::mutex> guard(input_mutex);
+        if(has_pending){
+            CVI_VI_ReleaseChnFrame(0,0,&pending);
+            has_pending=false;
+        }
+    }
     if(server_thread.joinable())server_thread.join();
-    if(created){CVI_VENC_StopRecvFrame(0);CVI_VENC_DestroyChn(0);}
-    SAMPLE_COMM_VI_DestroyIsp(&cfg);SAMPLE_COMM_VI_DestroyVi(&cfg);SAMPLE_COMM_SYS_Exit();
+    if(created){
+        CVI_VENC_StopRecvFrame(0);
+        CVI_VENC_DestroyChn(0);
+    }
+    SAMPLE_COMM_VI_DestroyIsp(&cfg);
+    SAMPLE_COMM_VI_DestroyVi(&cfg);
+    SAMPLE_COMM_SYS_Exit();
+
     printf("stopped frames=%lu encoded=%lu errors=%lu tuning_failed=%d recording_failed=%d\n",
            count,encoded.load(),errors.load(),tuning_failed,recording_failed.load());
-    return rc||errors||tuning_failed||recording_failed?1:0;
+
+    // ======================================================================
+    // 退出归因：自启动时这是"为什么停了"的唯一可靠来源（写进 state/run_history.log）
+    // ======================================================================
+    {
+        const char* reason="normal";
+        if(tuning_failed)reason="tuning_failed";
+        else if(recording_failed.load())reason="recording_failed";
+        else if(errors.load())reason="venc_errors";
+        else if(g_stop_signal)reason="stopped_by_signal";
+        const int ret=rc||errors||tuning_failed||recording_failed?1:0;
+        gt::diag_state("exit","rc=%d reason=%s frames=%lu encoded=%lu errors=%lu "
+                       "tuning_failed=%d recording_failed=%d stop_signal=%d timed_out=%lu temp=%dC",
+                       ret,reason,count,encoded.load(),errors.load(),(int)tuning_failed,
+                       recording_failed.load(),(int)g_stop_signal,timeouts,gt::diag_cpu_temp_c());
+        return ret;
+    }
 }

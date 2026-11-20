@@ -5,7 +5,6 @@ ROOT=/code/fly_LicheeRV
 CONFIG=${FLY_CONFIG_FILE:-$ROOT/config.yaml}
 # Auto-boot mode: use a dedicated always-on config, do not disturb the
 # interactive config.yaml used for manual runs / tests.
-[ "${AUTO_BOOT:-0}" = "1" ] && CONFIG=/code/fly_LicheeRV/config_boot.yaml
 
 # Limited flat-YAML reader: no eval/source, no nested structures, no silent typos.
 config_error() { echo "CONFIG_ERROR: $*" >&2; exit 2; }
@@ -52,9 +51,14 @@ RECORD_ENABLE=false
 RECORDING=0
 WEB_BIND=auto
 DISPLAY_ENABLE=true
+# 网页服务（MJPEG 预览/抓图）。关掉可省 CPU，但录像不受影响
+HTTP_ENABLE=true
 DETECT_SAMPLE_STEPS=2
 DETECT_STRIDE=1
 DETECT_ENABLE=true
+# OSD：把电控状态烧进画面左上角（录像里也能看到），默认关
+OSD_ENABLE=false
+OSD_SCALE=2
 # ---- 阶段1：目标跟踪 + 角度 + 串口（默认值与 camera.cpp 保持一致）----
 TRACK_ENABLE=true
 CAM_FX=1023.2
@@ -78,12 +82,32 @@ KF_MEASURE_NOISE=0.001
 KF_INIT_POS_VAR=10.0
 KF_INIT_VEL_VAR=2.0
 UART_ENABLE=false
+UART_TX_ENABLE=true
 UART_DEVICE=/dev/ttyS1
 UART_BAUD=115200
 UART_RATE_HZ=50
 UART_FORMAT=ascii
 UART_RX_PRINT=true
 UART_RX_PRINT_HZ=10
+# ---- 飞行数据记录（机型 default 与 camera.cpp 一致）----
+LOG_ENABLE=false
+LOG_MODE=trigger
+LOG_DIR=
+LOG_PREROLL_MS=3000
+LOG_POSTROLL_MS=2000
+LOG_MAX_SECONDS=30
+LOG_MCU_STREAM=false
+# ---- 诊断：分类打印开关（默认全开，等于与改动前一样）+ 运行状态历史目录 ----
+STATE_DIR=
+PRINT_ENABLE=true
+PRINT_BOOT=true
+PRINT_ISP=true
+PRINT_TARGET=true
+PRINT_PERF=true
+PRINT_UART=true
+PRINT_MCU=true
+PRINT_LOG=true
+PRINT_AVI=true
 
 [ -r "$CONFIG" ] || config_error "missing/unreadable $CONFIG"
 seen=' '
@@ -118,9 +142,12 @@ while IFS= read -r line || [ -n "$line" ]; do
         record_enable) RECORD_ENABLE=$value;;
         web_ip) WEB_BIND=$value;;
         display_enable) DISPLAY_ENABLE=$value;;
+        http_enable) HTTP_ENABLE=$value;;
         detect_sample_steps) DETECT_SAMPLE_STEPS=$value;;
         detect_stride) DETECT_STRIDE=$value;;
         detect_enable) DETECT_ENABLE=$value;;
+        osd_enable) OSD_ENABLE=$value;;
+        osd_scale) OSD_SCALE=$value;;
         track_enable) TRACK_ENABLE=$value;;
         cam_fx) CAM_FX=$value;;
         cam_fy) CAM_FY=$value;;
@@ -149,6 +176,24 @@ while IFS= read -r line || [ -n "$line" ]; do
         uart_format) UART_FORMAT=$value;;
         uart_rx_print) UART_RX_PRINT=$value;;
         uart_rx_print_hz) UART_RX_PRINT_HZ=$value;;
+        uart_tx_enable) UART_TX_ENABLE=$value;;
+        log_enable) LOG_ENABLE=$value;;
+        log_mode) LOG_MODE=$value;;
+        log_dir) LOG_DIR=$value;;
+        log_preroll_ms) LOG_PREROLL_MS=$value;;
+        log_postroll_ms) LOG_POSTROLL_MS=$value;;
+        log_max_seconds) LOG_MAX_SECONDS=$value;;
+        log_mcu_stream) LOG_MCU_STREAM=$value;;
+        state_dir) STATE_DIR=$value;;
+        print_enable) PRINT_ENABLE=$value;;
+        print_boot) PRINT_BOOT=$value;;
+        print_isp) PRINT_ISP=$value;;
+        print_target) PRINT_TARGET=$value;;
+        print_perf) PRINT_PERF=$value;;
+        print_uart) PRINT_UART=$value;;
+        print_mcu) PRINT_MCU=$value;;
+        print_log) PRINT_LOG=$value;;
+        print_avi) PRINT_AVI=$value;;
         *) config_error "unknown key $key";;
     esac
 done < "$CONFIG"
@@ -157,9 +202,12 @@ case "$EXPOSURE_MODE" in manual|auto) ;; *) config_error 'exposure_mode must be 
 case "$RECORD_ENABLE" in true|false) ;; *) config_error 'record_enable must be true or false';; esac
 case "$WEB_BIND" in auto|usb|wifi) ;; *) config_error 'web_ip must be auto, usb or wifi';; esac
 case "$DISPLAY_ENABLE" in true|false) ;; *) config_error 'display_enable must be true or false';; esac
+case "$HTTP_ENABLE" in true|false) ;; *) config_error 'http_enable must be true or false';; esac
 validate_integer detect_sample_steps "$DETECT_SAMPLE_STEPS" 1 4
 validate_integer detect_stride "$DETECT_STRIDE" 1 10
 case "$DETECT_ENABLE" in true|false) ;; *) config_error 'detect_enable must be true or false';; esac
+case "$OSD_ENABLE" in true|false) ;; *) config_error 'osd_enable must be true or false';; esac
+validate_integer osd_scale "$OSD_SCALE" 1 3
 case "$BLC_MODE" in manual|default) ;; *) config_error 'black_level_mode must be manual or default';; esac
 
 # ---- 阶段1：目标跟踪 / 标定 / 串口 校验 ----
@@ -195,6 +243,28 @@ case "$UART_DEVICE" in /dev/*) ;; *) config_error 'uart_device must start with /
 # 串口开着却没有跟踪链路 = 没有内容可发，直接拒绝，避免联调时白等
 [ "$UART_ENABLE" = "true" ] && [ "$TRACK_ENABLE" != "true" ] && \
     config_error 'uart_enable requires track_enable=true'
+# ---- 飞行数据记录 ----
+case "$UART_TX_ENABLE" in true|false) ;; *) config_error 'uart_tx_enable must be true or false';; esac
+case "$LOG_ENABLE" in true|false) ;; *) config_error 'log_enable must be true or false';; esac
+case "$LOG_MODE" in trigger|continuous) ;; *) config_error 'log_mode must be trigger or continuous';; esac
+validate_integer log_preroll_ms "$LOG_PREROLL_MS" 0 10000
+validate_integer log_postroll_ms "$LOG_POSTROLL_MS" 0 10000
+validate_integer log_max_seconds "$LOG_MAX_SECONDS" 1 300
+case "$LOG_MCU_STREAM" in true|false) ;; *) config_error 'log_mcu_stream must be true or false';; esac
+# trigger 模式靠电控 STATE 边沿触发；没有串口就永远不会有边沿，直接拒绝而不是静默空记
+[ "$LOG_ENABLE" = "true" ] && [ "$LOG_MODE" = "trigger" ] && [ "$UART_ENABLE" != "true" ] && \
+    config_error 'log_mode=trigger requires uart_enable=true (use log_mode=continuous otherwise)'
+if [ -n "$LOG_DIR" ]; then
+    case "$LOG_DIR" in /*) ;; *) config_error 'log_dir must be an absolute path';; esac
+fi
+# ---- 诊断开关 ----
+for _k in print_enable print_boot print_isp print_target print_perf print_uart print_mcu print_log print_avi; do
+    eval "_v=\${$(echo "$_k" | tr 'a-z' 'A-Z')}"
+    case "$_v" in true|false) ;; *) config_error "$_k must be true or false";; esac
+done
+if [ -n "$STATE_DIR" ]; then
+    case "$STATE_DIR" in /*) ;; *) config_error 'state_dir must be an absolute path';; esac
+fi
 validate_integer manual_exposure_us "$MANUAL_EXP_US" 100 10000
 validate_integer manual_analog_gain_x1024 "$MANUAL_AGAIN" 1024 16384
 validate_integer manual_digital_gain_x1024 "$MANUAL_DGAIN" 1024 4096
@@ -213,7 +283,9 @@ validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
 DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
     echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
-echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ,fmt=$UART_FORMAT,rx=$UART_RX_PRINT@$UART_RX_PRINT_HZ"
+echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ,fmt=$UART_FORMAT,rx=$UART_RX_PRINT@$UART_RX_PRINT_HZ,tx=$UART_TX_ENABLE osd=$OSD_ENABLE@x$OSD_SCALE"
+echo "CONFIG_LOG enable=$LOG_ENABLE mode=$LOG_MODE dir=${LOG_DIR:-<root>/logs} preroll=$LOG_PREROLL_MS postroll=$LOG_POSTROLL_MS max=$LOG_MAX_SECONDS"
+echo "CONFIG_DIAG state_dir=${STATE_DIR:-<root>/state} print=$PRINT_ENABLE boot=$PRINT_BOOT isp=$PRINT_ISP target=$PRINT_TARGET perf=$PRINT_PERF uart=$PRINT_UART mcu=$PRINT_MCU log=$PRINT_LOG avi=$PRINT_AVI"
     exit 0
 fi
 if [ "$DURATION" = '--recoding' ] || [ "$DURATION" = '--recording' ]; then
@@ -241,7 +313,7 @@ export RECORD80_BLC_GR="$BLC_GR"
 export RECORD80_BLC_GB="$BLC_GB"
 export RECORD80_BLC_B="$BLC_B"
 export RECORD80_JPEG_QUALITY="$JPEG_QUALITY"
-echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY duration=$DURATION recording=$RECORDING record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
+echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY duration=$DURATION recording=$RECORDING record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE http_enable=$HTTP_ENABLE"
 REG=0x030028c4
 ORIG=0x00200001
 TARGET=0x00210001
@@ -317,9 +389,12 @@ case "$WEB_BIND" in
     wifi) export WEB_IP_BIND=$(ifconfig wlan0 2>/dev/null | awk '/inet addr:/ {sub(/^addr:/, "", $2); print $2; exit}'); WEB_IP=$WEB_IP_BIND;;
 esac
 export DISPLAY_ENABLE="$DISPLAY_ENABLE"
+export HTTP_ENABLE="$HTTP_ENABLE"
 export DETECT_SAMPLE_STEPS="$DETECT_SAMPLE_STEPS"
 export DETECT_STRIDE="$DETECT_STRIDE"
 export DETECT_ENABLE="$DETECT_ENABLE"
+export OSD_ENABLE="$OSD_ENABLE"
+export OSD_SCALE="$OSD_SCALE"
 # ---- 阶段1：目标跟踪 / 标定 / 串口（camera.cpp 里严格校验范围）----
 export TRACK_ENABLE="$TRACK_ENABLE"
 export CAM_FX="$CAM_FX"
@@ -349,8 +424,49 @@ export UART_RATE_HZ="$UART_RATE_HZ"
 export UART_FORMAT="$UART_FORMAT"
 export UART_RX_PRINT="$UART_RX_PRINT"
 export UART_RX_PRINT_HZ="$UART_RX_PRINT_HZ"
+export UART_TX_ENABLE="$UART_TX_ENABLE"
+# 记录目录：配置里留空就用 $ROOT/logs（跟二进制/配置在一起，便于 scp 取回）
+# 一次飞行 = record/ 下的一个文件夹（视频 + CSV + meta 都在一起）
+[ -n "$LOG_DIR" ] || LOG_DIR="$ROOT/record"
+[ "$LOG_ENABLE" = "true" ] && mkdir -p "$LOG_DIR"
+export LOG_ENABLE="$LOG_ENABLE"
+export LOG_MODE="$LOG_MODE"
+export LOG_DIR="$LOG_DIR"
+export LOG_PREROLL_MS="$LOG_PREROLL_MS"
+export LOG_POSTROLL_MS="$LOG_POSTROLL_MS"
+export LOG_MAX_SECONDS="$LOG_MAX_SECONDS"
+export LOG_MCU_STREAM="$LOG_MCU_STREAM"
+
+# ---- 运行状态历史（自启动时唯一的事后可见通道）----
+# 与 camera 进程写同一个文件：一行一件事，跨重启保留（>256KB 由 camera 自己轮转）
+[ -n "$STATE_DIR" ] || STATE_DIR="$ROOT/state"
+mkdir -p "$STATE_DIR" 2>/dev/null || STATE_DIR=""
+CAM_STARTED=0
+EXIT_REASON=normal
+note() {
+    # note <tag> <message>
+    [ -n "$STATE_DIR" ] || return 0
+    _t=$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)
+    _w=$(date -u +%Y-%m-%dT%H:%M:%S 2>/dev/null || echo unknown)
+    printf 't=%ss wall=%s pid=%s tag=%s %s\n' "$_t" "$_w" "$$" "$1" "$2" >>"$STATE_DIR/run_history.log" 2>/dev/null || true
+    return 0
+}
+on_exit() {
+    _rc=$?
+    [ "$CAM_STARTED" = "1" ] || return 0
+    note supervisor_exit "reason=$EXIT_REASON rc=$_rc duration=${DURATION:-?}"
+    return 0
+}
+trap on_exit EXIT
+# ssh 断开/被 kill 时也要留下"我是怎么没的"——不然历史上只剩一条 supervisor_start
+trap 'EXIT_REASON=hangup; exit 129' HUP
+trap 'EXIT_REASON=terminated; exit 143' TERM
+trap 'EXIT_REASON=interrupted; exit 130' INT
+export STATE_DIR
+export PRINT_ENABLE PRINT_BOOT PRINT_ISP PRINT_TARGET PRINT_PERF PRINT_UART PRINT_MCU PRINT_LOG PRINT_AVI
+note supervisor_start "config=$CONFIG duration=${DURATION:-?} display=$DISPLAY_ENABLE record=$RECORDING uart=$UART_ENABLE/$UART_TX_ENABLE log=$LOG_ENABLE/$LOG_MODE print=$PRINT_ENABLE"
 if [ "$RECORDING" -eq 1 ]; then
-    RECORD_DIR="$ROOT/recordings"
+    RECORD_DIR="$ROOT/record"
     mkdir -p "$RECORD_DIR"
     "$ROOT/camera" "$WEB_IP" "$RECORD_DIR" 80 --recording-internal >"$LOG" 2>&1 &
 else
@@ -399,20 +515,22 @@ if [ "$RECORDING" -eq 1 ]; then
     echo "RECORDING_MODE=ON output_dir=$RECORD_DIR format=AVI/MJPEG"
 fi
 echo "WEB_READY http://$WEB_IP:8081/"
+CAM_STARTED=1
+note ready "web=$WEB_IP cam_pid=$CAM_PID fps_target=80"
 START=$(date +%s)
 LAST_STATS=''
 while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
     sleep 3
-    kill -0 "$CAM_PID" 2>/dev/null || { echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
+    kill -0 "$CAM_PID" 2>/dev/null || { EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
     TEMP=$(cat /sys/class/thermal/thermal_zone0/temp)
-    [ "$TEMP" -lt 74500 ] || { echo "TEMP_LIMIT=$TEMP"; exit 7; }
-    [ "$(clock)" = "$TARGET" ] || { echo CLOCK_CHANGED; exit 8; }
+    [ "$TEMP" -lt 74500 ] || { EXIT_REASON=temp_limit; note temp_limit "temp_millic=$TEMP limit_millic=74500"; echo "TEMP_LIMIT=$TEMP"; exit 7; }
+    [ "$(clock)" = "$TARGET" ] || { EXIT_REASON=clock_changed; echo CLOCK_CHANGED; exit 8; }
     ERROR_NOW=$(awk '/^[ ]*0[ ]+[0-9]+[ ]+[0-9]+[ ]+[0-9]+/{print $2,$3,$4,$5,$6;exit}' /proc/mipi-rx)
-    [ "$ERROR_NOW" = "$ERROR_BEFORE" ] || { echo "MIPI_CHANGED before=$ERROR_BEFORE after=$ERROR_NOW"; exit 9; }
+    [ "$ERROR_NOW" = "$ERROR_BEFORE" ] || { EXIT_REASON=mipi_changed; echo "MIPI_CHANGED before=$ERROR_BEFORE after=$ERROR_NOW"; exit 9; }
     NEW_STATS=$(grep '^capture_frames=' "$LOG" | tail -n 1 || :)
     if [ -n "$NEW_STATS" ] && [ "$NEW_STATS" != "$LAST_STATS" ]; then
         echo "$NEW_STATS"
         LAST_STATS=$NEW_STATS
     fi
 done
-if [ "$DURATION" -eq 0 ]; then echo RUN_ENDED_UNEXPECTEDLY; else echo TEST_COMPLETED; fi
+if [ "$DURATION" -eq 0 ]; then EXIT_REASON=run_ended; echo RUN_ENDED_UNEXPECTEDLY; else EXIT_REASON=test_completed; echo TEST_COMPLETED; fi

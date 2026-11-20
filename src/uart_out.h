@@ -61,6 +61,7 @@ struct WriteStartAgeStats {
 
 struct UartCfg {
   bool enable = false;
+  bool tx_enable = true;  // false = 只收不发（纯记录/联调模式）；端口仍然打开
   std::string device = "/dev/ttyS1";
   int baud = 115200;
   int rate_hz = 50;
@@ -80,6 +81,12 @@ class UartOut {
 
   // 打开设备并启动发送线程。失败返回 false（不抛异常、不影响主流程）。
   bool start(const UartCfg& cfg);
+
+  // 收到一帧 CMD=0x02 时的回调，**在串口线程上下文里同步调用**：
+  // 实现必须短、不可阻塞、不可抛异常（FrameLog::on_mcu 就是这种：只格式化入队）。
+  // rx_us 是本地接收时刻（CLOCK_MONOTONIC 微秒），协议本身没有时间戳。
+  using McuSink = void (*)(const McuState& m, MonoUs rx_us, void* user);
+  void set_mcu_sink(McuSink sink, void* user);
 
   // 停止线程并关闭设备（可重复调用）
   void stop();
@@ -102,7 +109,14 @@ class UartOut {
   // 数据只在串口线程里更新；这里加锁拷贝，供主线程打日志用。
   bool has_mcu() const;
   McuState last_mcu() const;          // 最近一帧电控数据（未收到过时全 0，用 has_mcu() 判断）
+  // 一次加锁同时取「快照 + 年龄 + 到达时刻」。
+  // 分三次调用（has_mcu/last_mcu/mcu_age_ms/mcu_rx_us）时，中间可能插进一帧新数据，
+  // 导致 age 和 rx_us 来自不同帧；这个接口保证三者属于同一帧。没收到过返回 false。
+  bool mcu_snapshot(McuState* out, int* age_ms, MonoUs* rx_us) const;
   int mcu_age_ms() const;             // 距最近一帧电控数据的毫秒数；-1 = 从未收到
+  // 最近一帧电控数据的**绝对接收时刻**（CLOCK_MONOTONIC 微秒）；0 = 还没收到过。
+  // 记录器把它和帧的 capture_us 一起写进同一行，这样每行都自带两个时刻，事后不用推算。
+  MonoUs mcu_rx_us() const;
   unsigned long rx_frames() const;    // 收到的合法 0x02 帧数
   unsigned long rx_crc_errors() const;
   unsigned long rx_other_frames() const;   // 收到的其它 CMD 帧（例如回环的 0x01）
@@ -127,6 +141,8 @@ class UartOut {
 
   UartCfg cfg_;
   int fd_ = -1;
+  McuSink mcu_sink_ = nullptr;   // 由主线程 start() 之前设置，之后只读
+  void* mcu_sink_user_ = nullptr;
   // 终端副本：start.sh 会把 camera 的 stdout 重定向到日志文件，手动运行时用 /dev/tty
   // 把 [MCU] 行同时打到用户眼前（开不出来就只走 stdout）。
   int tty_fd_ = -1;
@@ -149,6 +165,7 @@ class UartOut {
   McuState last_mcu_{};
   bool has_mcu_ = false;
   double last_mcu_ms_ = -1.0;      // 串口线程内使用
+  MonoUs last_mcu_rx_us_ = 0;      // 同上，微秒精度（记录器要写进 CSV）
   double last_print_ms_ = -1.0;    // 打印限频
   unsigned long rx_frames_ = 0;
   unsigned long rx_crc_errors_ = 0;

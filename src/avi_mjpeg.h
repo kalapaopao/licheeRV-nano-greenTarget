@@ -9,6 +9,8 @@
 #include <vector>
 #include <unistd.h>
 
+#include "diag.h"
+
 class AviMjpegWriter {
     struct Entry { uint32_t offset, size; };
     FILE* file_ = nullptr;
@@ -43,13 +45,20 @@ class AviMjpegWriter {
     bool patch(long offset, uint32_t value) {
         return fseek(file_, offset, SEEK_SET) == 0 && u32(file_, value);
     }
-    bool start(const std::string& directory) {
-        char stamp[32] = {};
-        time_t t = time(nullptr);
-        struct tm tmv{};
-        localtime_r(&t, &tmv);
-        strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tmv);
-        path_ = directory + "/gc4653_" + stamp + "_" + std::to_string(static_cast<long>(getpid())) + ".avi";
+    // 打开一个新的 AVI。
+    //   base 非空：文件名用 <base>.avi（会话模式，固定叫 video.avi，便于和数据放同一目录）
+    //   base 为空：文件名用 gc4653_<时间戳>_<pid>.avi（连续模式，保留原行为）
+    bool start(const std::string& directory, const std::string& base = std::string()) {
+        if (base.empty()) {
+            char stamp[32] = {};
+            time_t t = time(nullptr);
+            struct tm tmv{};
+            localtime_r(&t, &tmv);
+            strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tmv);
+            path_ = directory + "/gc4653_" + stamp + "_" + std::to_string(static_cast<long>(getpid())) + ".avi";
+        } else {
+            path_ = directory + "/" + base + ".avi";
+        }
         file_ = fopen(path_.c_str(), "wb");
         if (!file_) { perror("RECORDING_OPEN_FAILED"); return false; }
         bool ok = true;
@@ -94,14 +103,24 @@ class AviMjpegWriter {
         ok &= u32(file_, 0) && four(file_, "movi");
         movi_fourcc_pos_ = ftell(file_) - 4;
         if (!ok) { perror("RECORDING_HEADER_FAILED"); failed_ = true; return false; }
-        printf("RECORDING_STARTED file=%s format=MJPEG_AVI size=1280x720\n", path_.c_str());
+        if (gt::diag(gt::kDiagAvi)) {
+            printf("RECORDING_STARTED file=%s format=MJPEG_AVI size=1280x720\n", path_.c_str());
+        }
         return true;
     }
 public:
+    // 显式开一个文件（会话模式：<会话目录>/video.avi）
+    bool open_named(const std::string& dir, const std::string& base) {
+        if (file_) finish();
+        failed_ = false;
+        return start(dir, base);
+    }
+    bool is_open() const { return file_ != nullptr; }
+    const std::string& path() const { return path_; }
+    size_t frames() const { return index_.size(); }
     bool write(const std::string& dir, const unsigned char* jpeg, size_t len, uint64_t pts) {
         if (failed_) return false;
-        if (!file_ && !start(dir)) { failed_ = true; return false; }
-        // RIFF/AVI 1.0 uses 32-bit offsets. Stop before it can overflow.
+        if (!file_ && !start(dir)) { failed_ = true; return false; }        // RIFF/AVI 1.0 uses 32-bit offsets. Stop before it can overflow.
         long pos = ftell(file_);
         if (pos < 0 || pos > 3500000000LL || len > 2000000 || index_.size() >= 200000u) {
             fprintf(stderr, "RECORDING_LIMIT_REACHED file=%s\n", path_.c_str());
@@ -148,8 +167,10 @@ public:
             ok &= patch(strh_length_pos_, static_cast<uint32_t>(index_.size()));
             ok &= patch(4, static_cast<uint32_t>(end_file - 8));
             ok &= fflush(file_) == 0;
-            if (ok) printf("RECORDING_SAVED file=%s frames=%zu fps=%.3f bytes=%ld\n",
-                           path_.c_str(), index_.size(), fps, end_file);
+            if (ok && gt::diag(gt::kDiagAvi)) {
+                printf("RECORDING_SAVED file=%s frames=%zu fps=%.3f bytes=%ld\n",
+                       path_.c_str(), index_.size(), fps, end_file);
+            }
         }
         if (fclose(file_) != 0) ok = false;
         file_ = nullptr;

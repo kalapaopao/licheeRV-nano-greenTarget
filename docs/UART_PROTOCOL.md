@@ -16,24 +16,30 @@
 
 | 项 | 值 | 备注 |
 |---|---|---|
-| 设备 | `/dev/ttyS1`（可配 `uart_device`） | ⚠️ **不是 ttyS0**：S0 是内核 console，被 getty 占用 |
+| 设备 | `/dev/ttyS1`（可配 `uart_device`） | 就是 **UART1**；`ttyS0` 是内核 console，被 getty 占用，**不能用于电控** |
 | 波特率 | 115200（可配 `uart_baud`） | 8N1，无流控，raw 模式 |
 | 电平 | 3.3V TTL | 接线注意 TX/RX 交叉、共地 |
 | 发送频率 | 50 Hz（可配 `uart_rate_hz`） | **固定节奏发送，没目标也发** |
 
-> ⚠️ **2026-11-11 板端实测的不一致（必须先确认再接电控）**：板子上跑的
-> `/code/fly_LicheeRV/config{,_boot}.yaml` 里写的是 `uart_device: /dev/ttyS0`、`uart_rate_hz: 100`，
-> 与本文档的 `ttyS1` / `50Hz` 不符。其中 `ttyS0` 就是内核 console（`/proc/cmdline` 里
-> `console=ttyS0,115200`，且 `getty` 挂在 console 上），也就是说**协议字节和内核/登录输出共用同一根线**。
-> v2 有帧头 + CRC 可以重新同步，但**如果电控接的是排针上另一路 UART，他们一个字节都收不到**。
-> 已在部署时把 rate 改为文档要求的 50Hz，`uart_device` **没有动**（改线序属于硬件决定，需你确认）。
+**接线（2026-11-20 起，通讯改到 UART1）**：
 
-**接线**：视觉板 `ttyS1 TX` → 电控 `RX`；视觉板 `ttyS1 RX` → 电控 `TX`；GND 共地。
-（视觉侧目前只发不收，RX 可不接。）
+```
+视觉板 UART1 TX (排针 GPIOA19) ──► 电控 RX
+视觉板 UART1 RX (排针 GPIOA18) ◄── 电控 TX
+GND ◄──────────────────────────► GND      （必须共地）
+```
 
-⚠️ **硬件待确认**：LicheeRV Nano 排针上实际引出的是哪几个 UART，需要对照原理图确认。
-设备树里有 ttyS0~ttyS4 五个节点，但排针未必都引出。若 ttyS1 不通，可改
-`uart_device` 试 ttyS2/ttyS3/ttyS4。
+> ⚠️ **引脚以实测为准**：设备树里 `serial@04150000`（UART1）状态是 `okay`，但内核 DT 里没有
+> pinctrl 节点（pin mux 由 bootloader 设），所以"软件能发字节"不等于"排针上有波形"。
+> 第一次接线请用 USB-TTL 接在 UART1 TX 上确认能收到帧（见下方"一分钟自检"）。
+> 若收不到，可把 `uart_device` 依次改成 `/dev/ttyS2`、`/dev/ttyS3` 再试（同为空闲口）。
+
+**一分钟自检**（不用电控，USB-TTL 即可）：
+
+1. 板端把 `uart_enable` 设为 `true`，`sh start.sh 30`；
+2. 看日志出现 `UART: /dev/ttyS1 @ 115200 8N1, rate=50Hz, format=binary-v2(28B), tx=on`；
+3. 串口助手 115200 8N1 打开 USB-TTL，应每 20ms 收到 28 字节：`A5 5A 15 .. 01 ..`；
+4. 粘一段十六进制存成 txt，`python tools/decode_v2.py --file 抓包.txt` 能解出 `SEQ/detected/yaw/...`。
 
 ---
 

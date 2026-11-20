@@ -30,7 +30,7 @@ run_seconds: 120
 
 # Recording switch: true = every start records an MJPEG/AVI into recordings/
 # (no --recoding argument needed); false = preview only.
-record_enable: false
+record_enable: true
 
 # Web preview bind: auto = all interfaces (USB 10.133.124.1 AND Wi-Fi both work);
 # usb = USB NIC only; wifi = Wi-Fi NIC only.
@@ -39,6 +39,8 @@ web_ip: auto
 # Display switch: true = start JPEG encoder + HTTP preview (draws detection box);
 # false = no encoder, no web server (combat mode: saves CPU and heat).
 display_enable: true
+# 网页服务（MJPEG 预览/抓图）。关掉可省 CPU：录像与编码不受影响。
+http_enable: false
 
 # Detection sampling density inside each stride block: 1=fastest(3.7ms)
 # 2=balanced(9.4ms, default) 4=best small-target(27ms, halves fps).
@@ -49,6 +51,13 @@ detect_stride: 1
 # Detection switch: false = skip the green-target detector entirely
 # (pure capture, useful for measuring the detector's cost).
 detect_enable: true
+
+# 画面左上角叠加电控状态（烧进像素里，所以录像/网页/抓图都看得到）。
+# 4 行：帧号+STATE+SEQ+电控数据年龄 / 陀螺 GX GY GZ / 姿态 R P Y / 目标角。
+# 数据取自「这一帧采集时刻」的最近一帧电控数据，编码丢帧也不会错位。
+osd_enable: false
+# 字号倍数：1=8px 高（省地方但小），2=16px（推荐），3=24px（远看）
+osd_scale: 1
 
 # ===========================================================================
 # 阶段1：多目标筛选 + 卡尔曼 + 角度输出 + 串口（联调用）
@@ -111,10 +120,14 @@ kf_init_pos_var: 10.0
 kf_init_vel_var: 2.0
 
 # ---- 串口输出（发给电控）--------------------------------------------------
-# ⚠️ 默认关闭。开启后若设备打不开，camera 会直接退出（返回码 3），
-#    因为联调时「静默收不到数据」比启动失败更难排查。
-uart_enable: false
-# /dev/ttyS0 是内核 console（被 getty 占用），不能用；S1~S4 空闲。
+# 总开关。开启后若设备打不开，camera 会直接退出（返回码 3），
+# 因为联调时「静默收不到数据」比启动失败更难排查。
+#
+# 现场接线（2026-11-20 起）：通讯改到 **UART1**，设备节点就是 /dev/ttyS1。
+#   UART0 = /dev/ttyS0 = 内核 console（getty + 内核日志都在这，**不要用于电控**）
+#   UART1 = /dev/ttyS1 = 右排 GPIOA19(TX) / GPIOA18(RX)，空闲、干净
+#   接法：视觉 TX → 电控 RX；电控 TX → 视觉 RX；两板共地；3.3V 电平
+uart_enable: true
 uart_device: /dev/ttyS1
 uart_baud: 115200
 # 发送频率（Hz）。固定节奏发送，即使没有目标也发心跳帧。
@@ -130,3 +143,52 @@ uart_format: binary
 # 电控按 100Hz 发，这里限频打印，避免刷屏；联调时改成 20 更跟手。
 uart_rx_print: true
 uart_rx_print_hz: 10
+# 发送开关：true = 正常收发；false = 只收不发（端口仍以 115200 打开，用于纯数据采集）。
+uart_tx_enable: true
+
+# ===========================================================================
+# 飞行数据记录（T+ 预录触发）
+# ===========================================================================
+# 触发源：电控 CMD=0x02 的 STATE 边沿（STATIC→FLIGHT 起飞，FLIGHT→* 落地）。
+# 视觉侧没有 IMU，所以 trigger 模式必须 uart_enable=true（只收不发也行：uart_tx_enable=false）。
+#
+# 产物（每次起飞一个目录）：
+#   logs/sess_<开机秒数>s_<pid>_<n>/frames.csv   相机每帧一行（含 frame_id / 采集时刻 / 角度 / 像素）
+#   logs/sess_<开机秒数>s_<pid>_<n>/mcu.csv      电控每帧一行（SEQ/STATE/FLAGS/欧拉角/陀螺）
+#   logs/sess_<开机秒数>s_<pid>_<n>/meta.txt     触发时刻、配置快照、结束原因、丢行数
+#   logs/health_<..>.csv                         每秒一行，答「这场为什么没记到」
+#   logs/video_frames_<..>.csv                   AVI 帧号 ↔ 相机帧号（录像对帧用）
+log_enable: true
+# trigger = 只记起飞→落地这一段（带预录）；continuous = 开机即连续记录。
+log_mode: trigger
+# 预录窗口（毫秒）：触发前这么多秒的数据进环形缓冲，触发时整体落盘。
+# 别设 0——电控判定 + 10ms 发送 + 视觉接收，飞机早就离手了，0 必然丢开头。
+log_preroll_ms: 3000
+# 落地后继续记多久（电控 STOP 后会继续发帧，尾声也要）。
+log_postroll_ms: 2000
+# 单段上限（秒）：防止一直不离开 FLIGHT 时把卡写满；到点强制收尾，meta 里写 max_seconds。
+log_max_seconds: 30
+# 是否额外保存 100Hz 原始电控流（mcu.csv）。
+# 默认 false：frames.csv 每行已带该帧时刻的电控数据，单文件就是成品表；
+# 只有想看两帧之间的完整波形时才打开。
+log_mcu_stream: false
+# 记录目录；留空（注释掉）= 程序目录下的 logs/。必须是绝对路径。
+# log_dir: /code/fly_LicheeRV/logs
+
+# ===========================================================================
+# 诊断：分类打印开关 + 运行状态历史
+# ===========================================================================
+# 总开关。false = 除错误行和退出摘要外什么都不打（stdout/日志都安静），
+# 但 state/run_history.log 照写——那是开机自启动"到底跑没跑起来"的唯一证据。
+print_enable: true
+# 分类开关（只在 print_enable=true 时有效）。默认全开 = 与改动前完全一样。
+print_boot: true      # 启动诊断：池/传感器/VI/VENC/CAMERA_READY
+print_isp: true       # 曝光/黑电平/ISP 调参与 5 秒回读
+print_target: true    # 绿灯检测结果（GREEN_TARGET / GREEN_STAT）
+print_perf: true      # 每 5 秒性能统计（capture_frames/DETECT/TIMING/PTS_STAT/CLOCK36）
+print_uart: true      # 串口发送统计与启动行
+print_mcu: true       # 电控下行帧（[MCU] ...）
+print_log: true       # 记录器状态（LOG / LOG_SESSION_*）
+print_avi: true       # 录像保存提示
+# 运行状态目录；留空（注释掉）= 程序目录下的 state/。必须是绝对路径。
+# state_dir: /code/fly_LicheeRV/state
