@@ -97,6 +97,7 @@ tools/gen_flight_timeline.py  生成「一次飞行的时间线」流程图
 tools/gen_row_life.py    生成「一行数据的一生」流程图（两个时刻是怎么钉进一行的）
 tools/gen_frame_timeline.py  生成「两个数据流的时间轴」（100Hz 电控 vs 80Hz 相机怎么错位）
 tools/gen_thread_dataflow.py 生成「线程间数据流与共享结构」（谁写谁读、锁保护哪一步）
+tools/gen_architecture_diagram.py 在原图上补画线程/记录器/诊断分区（架构图生成）
 
 tests/                  单元测试与仿真（见第 7 节）
 status.sh               一条命令看板端状态（进程/温度/历史/最近记录）
