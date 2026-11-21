@@ -163,6 +163,7 @@ tag=supervisor_start  →  tag=start  →  tag=ready  →  tag=alive（每 30s�
 **数据**：`record/sess_*/`（每次起飞一个文件夹：`frames.csv` + `video.avi` + `video_frames.csv` + `meta.txt`）、`record/health_*.csv`。
 
 细节与字段定义：[docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md)、[docs/DATA_RECORDING.md](docs/DATA_RECORDING.md)。
+终端每行/每个文件每一列是什么：[docs/OUTPUT_REFERENCE.md](docs/OUTPUT_REFERENCE.md)。
 
 ---
 
