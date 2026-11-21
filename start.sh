@@ -1,4 +1,4 @@
-﻿#!/bin/sh
+#!/bin/sh
 # Standalone GC4653 / 80 FPS / 3000us; optional native MJPEG AVI recording.
 set -eu
 ROOT=/code/fly_LicheeRV
@@ -97,6 +97,8 @@ LOG_PREROLL_MS=3000
 LOG_POSTROLL_MS=2000
 LOG_MAX_SECONDS=30
 LOG_MCU_STREAM=false
+# 一次飞行（会话）归档完就退出进程，不常驻待命（省电降温）
+EXIT_AFTER_LAND=false
 # ---- 诊断：分类打印开关（默认全开，等于与改动前一样）+ 运行状态历史目录 ----
 STATE_DIR=
 PRINT_ENABLE=true
@@ -184,6 +186,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         log_postroll_ms) LOG_POSTROLL_MS=$value;;
         log_max_seconds) LOG_MAX_SECONDS=$value;;
         log_mcu_stream) LOG_MCU_STREAM=$value;;
+        exit_after_land) EXIT_AFTER_LAND=$value;;
         state_dir) STATE_DIR=$value;;
         print_enable) PRINT_ENABLE=$value;;
         print_boot) PRINT_BOOT=$value;;
@@ -251,6 +254,7 @@ validate_integer log_preroll_ms "$LOG_PREROLL_MS" 0 10000
 validate_integer log_postroll_ms "$LOG_POSTROLL_MS" 0 10000
 validate_integer log_max_seconds "$LOG_MAX_SECONDS" 1 300
 case "$LOG_MCU_STREAM" in true|false) ;; *) config_error 'log_mcu_stream must be true or false';; esac
+case "$EXIT_AFTER_LAND" in true|false) ;; *) config_error 'exit_after_land must be true or false';; esac
 # trigger 模式靠电控 STATE 边沿触发；没有串口就永远不会有边沿，直接拒绝而不是静默空记
 [ "$LOG_ENABLE" = "true" ] && [ "$LOG_MODE" = "trigger" ] && [ "$UART_ENABLE" != "true" ] && \
     config_error 'log_mode=trigger requires uart_enable=true (use log_mode=continuous otherwise)'
@@ -436,6 +440,7 @@ export LOG_PREROLL_MS="$LOG_PREROLL_MS"
 export LOG_POSTROLL_MS="$LOG_POSTROLL_MS"
 export LOG_MAX_SECONDS="$LOG_MAX_SECONDS"
 export LOG_MCU_STREAM="$LOG_MCU_STREAM"
+export EXIT_AFTER_LAND="$EXIT_AFTER_LAND"
 
 # ---- 运行状态历史（自启动时唯一的事后可见通道）----
 # 与 camera 进程写同一个文件：一行一件事，跨重启保留（>256KB 由 camera 自己轮转）
@@ -497,8 +502,19 @@ else
 fi
 CAM_PID=$!
 printf '%s\n' "$CAM_PID" > "$LOCK/camera.pid"
+
+# 判断相机子进程是否还活着。
+# ⚠️ 不能用 `kill -0` 单判：子进程退出后如果父进程（本脚本）没 wait 过，
+# 它会变成僵尸（stat 第 3 字段 = Z），而 kill -0 对僵尸依然返回成功。
+# 早期版本就是这么写的，导致「相机崩了/正常收工」都检测不到，
+# 只能等 duration 到点 —— 崩溃检测实际是失效的。
+cam_alive() {
+    [ -d "/proc/$1" ] || return 1
+    [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != "Z" ]
+}
+
 sleep 7
-kill -0 "$CAM_PID" 2>/dev/null || { echo CAMERA_EXITED_EARLY; tail -15 "$LOG"; exit 5; }
+cam_alive "$CAM_PID" || { echo CAMERA_EXITED_EARLY; tail -15 "$LOG"; exit 5; }
 grep -q '^CAMERA_READY' "$LOG" || { echo CAMERA_NOT_READY; tail -15 "$LOG"; exit 5; }
 if [ "$EXPOSURE_MODE" = manual ]; then
     grep -q "^EXPOSURE_SET us=$MANUAL_EXP_US .*rc=0$" "$LOG" || { echo EXPOSURE_NOT_APPLIED; tail -15 "$LOG"; exit 5; }
@@ -551,7 +567,17 @@ START=$(date +%s)
 LAST_STATS=''
 while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
     sleep 3
-    kill -0 "$CAM_PID" 2>/dev/null || { EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
+    # 相机退出：区分「落地后正常收工」和「真的崩了」
+    # exit_after_land=true 时会话归档完相机主动退出并打印 EXIT_AFTER_LAND，
+    # 那不是崩溃，应该记成正常结束（reason=landed_exit）而不是 camera_crash。
+    cam_alive "$CAM_PID" || {
+        if grep -q 'EXIT_AFTER_LAND' "$LOG" 2>/dev/null; then
+            EXIT_REASON=landed_exit
+            echo "CAMERA_EXIT_AFTER_LAND (会话已归档，按配置退出)"
+            note supervisor_exit "reason=landed_exit rc=0"
+            exit 0
+        fi
+        EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
     TEMP=$(cat /sys/class/thermal/thermal_zone0/temp)
     [ "$TEMP" -lt 74500 ] || { EXIT_REASON=temp_limit; note temp_limit "temp_millic=$TEMP limit_millic=74500"; echo "TEMP_LIMIT=$TEMP"; exit 7; }
     [ "$(clock)" = "$TARGET" ] || { EXIT_REASON=clock_changed; echo CLOCK_CHANGED; exit 8; }

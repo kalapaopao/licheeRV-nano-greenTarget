@@ -278,6 +278,7 @@ const McuState* mcu_snapshot(McuState* out) {
 | `log_preroll_ms` | `3000` | 预录窗口。**别设 0**，会丢起飞瞬间 |
 | `log_postroll_ms` | `2000` | 落地后继续记多久 |
 | `log_max_seconds` | `30` | 单段上限，防写满卡 |
+| `exit_after_land` | `false` | `true` = 落地 + postroll 归档完，相机进程自己退出（start.sh 记 reason=landed_exit，不当崩溃）；`false` = 常驻等下一次起飞 |
 | `log_mcu_stream` | `false` | 是否额外存 100Hz 原始电控流（`mcu.csv`）。**默认关**：`frames.csv` 每行已带电控数据，单文件就是成品表 |
 | `log_dir` | 程序目录/`logs` | 绝对路径；留空即用默认 |
 | `uart_tx_enable` | `true` | `false` = 只收不发（纯采集）。**注意 `log_mode=trigger` 要求 `uart_enable=true`**，即使不发也要开着串口才能收 |

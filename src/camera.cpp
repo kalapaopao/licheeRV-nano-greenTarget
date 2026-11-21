@@ -66,6 +66,8 @@ static unsigned long g_frame_idx=0;
 static int g_sample_steps=2;   // 每块 n×n 采样点数（1..4）
 static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
 static bool g_osd_on=false;    // osd_enable：把电控状态烧进画面左上角
+// exit_after_land：true = 一次飞行（一个会话）归档完就退出进程，不常驻待命
+static bool g_exit_after_land=false;
 static int g_osd_scale=1;      // 字号倍数（1..3）；字库本身已是 8×16，scale=1 就够看
 // 电控 STATE 的短标签（OSD 只有 ASCII 字库）
 static const char* mcu_state_txt(uint8_t s){
@@ -419,6 +421,7 @@ int main(int argc,char** argv){
     if(getenv("DETECT_ENABLE") && !strcmp(getenv("DETECT_ENABLE"),"false"))g_detect_on=false;
     if(getenv("DRAW_TEST_BOX") && !strcmp(getenv("DRAW_TEST_BOX"),"1"))g_draw_test_box=true;
     if(getenv("OSD_ENABLE") && !strcmp(getenv("OSD_ENABLE"),"true"))g_osd_on=true;
+    if(getenv("EXIT_AFTER_LAND") && !strcmp(getenv("EXIT_AFTER_LAND"),"true"))g_exit_after_land=true;
     if(getenv("OSD_SCALE")){
         int v=atoi(getenv("OSD_SCALE"));
         if(v>=1&&v<=3)g_osd_scale=v;
@@ -1195,6 +1198,26 @@ int main(int argc,char** argv){
             }
         }
         // ------------------------------------------------------------------
+        // exit_after_land：一次飞行（一个会话）结束就退出进程
+        // 会话的开启/关闭由记录器线程决定（STATE 边沿 + postroll），这里只读它的统计：
+        //   sessions>=1 说明至少开过一段（收到过起飞），open==0 说明这段已经收尾写完了
+        // 满足就说明"这次飞行已经归档完毕"，可以退出，省电降温、也让 start.sh 收工。
+        // 默认关闭（exit_after_land=false），保持常驻待命的老行为。
+        // ------------------------------------------------------------------
+        if(g_exit_after_land && g_log.running()){
+            const gt::LogStats ls=g_log.stats();
+            if(ls.sessions>0 && ls.open==0){
+                DIAGF(gt::kDiagLog,"EXIT_AFTER_LAND sessions=%lu 会话已归档，进程退出\n",ls.sessions);
+                printf("EXIT_AFTER_LAND sessions=%lu\n",ls.sessions);
+                fflush(stdout);
+                // ⚠️ 必须先停掉 running，再 break。
+                // 编码线程是 while(running) 循环，不置 0 的话 join() 会永远阻塞
+                //（实测卡了 108 秒直到收到 SIGTERM），收尾看起来像"程序不退出"。
+                running=0;
+                break;
+            }
+        }
+        // ------------------------------------------------------------------
         // 每 5 秒一次的性能统计。每行一个指标组，字段含义见 docs/DIAGNOSTICS.md
         // ------------------------------------------------------------------
         if(t-report>=5 && count>1){
@@ -1315,11 +1338,19 @@ int main(int argc,char** argv){
     // ======================================================================
     // 7. 收尾：顺序有讲究——先停生产者（编码线程/串口），再停消费者（记录器、HTTP），
     //    最后才拆 VI/ISP，否则会出现"往已销毁的通道写帧"。
+    // 每一步都打一行 SHUTDOWN step，万一卡住能立刻看出卡在哪一步
+    // （之前 exit_after_land 测试就卡过一次，没有任何时间线，只能靠猜）。
     // ======================================================================
+    const gt::MonoUs shut_t0=gt::monotonic_us();
+    DIAGF(gt::kDiagLog,"SHUTDOWN step=1 encoder_join begin\n");
     if(encoder_thread.joinable())encoder_thread.join();
+    DIAGF(gt::kDiagLog,"SHUTDOWN step=2 uart_stop begin (+%.0fms)\n",(gt::monotonic_us()-shut_t0)/1000.0);
     g_uart.stop();                       // 串口线程会往 tty 写，必须先停
+    DIAGF(gt::kDiagLog,"SHUTDOWN step=3 avi_finish begin (+%.0fms)\n",(gt::monotonic_us()-shut_t0)/1000.0);
     if(recording_enabled && !avi.finish())recording_failed=1;
+    DIAGF(gt::kDiagLog,"SHUTDOWN step=4 log_stop begin (+%.0fms)\n",(gt::monotonic_us()-shut_t0)/1000.0);
     g_log.stop();                        // 记录器最后停：把缓冲里剩下的行写完并收尾 meta.txt
+    DIAGF(gt::kDiagLog,"SHUTDOWN step=5 release_pending begin (+%.0fms)\n",(gt::monotonic_us()-shut_t0)/1000.0);
     {
         std::lock_guard<std::mutex> guard(input_mutex);
         if(has_pending){

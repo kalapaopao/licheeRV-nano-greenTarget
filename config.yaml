@@ -172,6 +172,10 @@ log_max_seconds: 30
 # 默认 false：frames.csv 每行已带该帧时刻的电控数据，单文件就是成品表；
 # 只有想看两帧之间的完整波形时才打开。
 log_mcu_stream: false
+# 一次飞行（会话）归档完就退出进程，不常驻待命。
+# true = 落地 + postroll 后程序自己结束（省电降温，适合赛场单次发射）
+# false = 常驻待命，等下一次起飞（适合反复调试）
+exit_after_land: false
 # 记录目录；留空（注释掉）= 程序目录下的 logs/。必须是绝对路径。
 # log_dir: /code/fly_LicheeRV/logs
 

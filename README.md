@@ -127,6 +127,7 @@ CMakeLists.txt          编译配置（源码清单 + 链接参数）
 | 运行 | `run_seconds`(0=常驻) `web_ip` `display_enable` `record_enable` | 时长、绑定网卡、是否开编码/预览、是否录像 |
 | 检测 | `detect_enable` `detect_stride` `detect_sample_steps`(1..4) | 抽点密度；**80fps 必须用 steps=1** |
 | 网页服务 | http_enable | alse = 不起 HTTP 服务（省 CPU/带宽），**录像与编码不受影响** |
+| 落地退出 | `exit_after_land` | `true` = 一次飞行归档完（落地 + postroll）程序自己退出，不常驻待命；`false` = 常驻等下一次起飞 |
 | 画面叠加 | `osd_enable` `osd_scale`(1..3) | 把电控状态烧进画面左上角（4 行：帧号+STATE+SEQ+年龄 / 陀螺 / 姿态 / 目标角），录像里也看得到 |
 | 标定 | `cam_fx/fy/cx/cy` `optical_*_deg` `cam_invert_*` `target_diameter_m` `target_up_offset_factor` | 像素→角度、光轴补偿、单目测距、瞄准点偏移 |
 | 跟踪 | `track_enable` `sel_*` `kf_*` | 多目标评分、确认/丢失帧数、卡尔曼噪声 |
