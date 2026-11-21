@@ -23,6 +23,7 @@
 #include <cerrno>
 #include <ctime>
 #include <vector>
+#include <deque>
 #include <string>
 #include <mutex>
 #include <thread>
@@ -68,6 +69,8 @@ static bool g_detect_on=true;  // detect_enable：false 时完全不跑检测
 static bool g_osd_on=false;    // osd_enable：把电控状态烧进画面左上角
 // exit_after_land：true = 一次飞行（一个会话）归档完就退出进程，不常驻待命
 static bool g_exit_after_land=false;
+// 视频预录窗口（毫秒），由 LOG_PREROLL_MS 决定；0 = 不做视频预录
+static unsigned g_video_preroll_ms=3000;
 static int g_osd_scale=1;      // 字号倍数（1..3）；字库本身已是 8×16，scale=1 就够看
 // 电控 STATE 的短标签（OSD 只有 ASCII 字库）
 static const char* mcu_state_txt(uint8_t s){
@@ -272,6 +275,27 @@ static void http_server(int server){
 }
 static void encoder_worker(){
     unsigned long avi_index=0;   // AVI 内第几帧（0 起），与 CSV 的 frame_id 不是一回事
+    // ---- 视频预录环形缓冲（trigger 模式）------------------------------------
+    // 会话是在 STATE 0→1 触发时才打开的，AVI 也在那时才创建 —— 所以视频天然
+    // 从"触发那一刻"开始，起飞前的画面全丢。而 frames.csv 有 preroll 回滚，
+    // 于是出现「数据有预录、视频没有」的不一致（实测：CSV 第 0 帧 t=0，
+    // 视频第 0 帧 t=2.99s，正好是触发时刻）。
+    // 这里把最近 log_preroll_ms 内的编码帧留在内存，会话一打开就先把它们写进 AVI。
+    struct PreRollFrame { std::vector<unsigned char> jpg; uint32_t fid; gt::MonoUs cap_us; uint64_t pts; };
+    std::deque<PreRollFrame> preroll_ring;
+    size_t preroll_bytes=0;
+    const size_t kPreRollByteCap=20u*1024*1024;   // 硬上限 20MB：板子 MemAvailable 约 79MB
+    // 每帧最多保留 preroll_ms 内的帧；帧率上限按 100fps 估，防止配置写大时爆内存
+    auto preroll_trim=[&](gt::MonoUs now_us){
+        const gt::MonoUs cutoff=now_us-(gt::MonoUs)g_video_preroll_ms*1000;
+        const size_t frame_cap=(size_t)(g_video_preroll_ms/1000)*100+4;
+        while(!preroll_ring.empty() &&
+              (preroll_ring.front().cap_us<cutoff || preroll_bytes>kPreRollByteCap ||
+               preroll_ring.size()>frame_cap)){
+            preroll_bytes-=preroll_ring.front().jpg.size();
+            preroll_ring.pop_front();
+        }
+    };
     while(running){
         // 从主线程拿"最新一帧"（拿不到就等 1ms），同时取出该帧的帧号/采集时刻
         VIDEO_FRAME_INFO_S frame{};
@@ -319,6 +343,7 @@ static void encoder_worker(){
                         // 否则退回原来的连续录像（recordings/ 下一个大文件），供没开记录时调试用。
                         std::string sdir;
                         const bool in_sess=g_log.running() && g_log.session_video_dir(&sdir);
+                        bool flush_preroll=false;
                         if(in_sess){
                             if(avi_owner!=sdir){
                                 if(avi.is_open() && !avi.finish())recording_failed=1;
@@ -327,6 +352,7 @@ static void encoder_worker(){
                                 }else{
                                     avi_owner=sdir;
                                     avi_index=0;      // 每段视频的帧号从 0 开始
+                                    flush_preroll=true;   // 新会话：先补预录帧
                                 }
                             }
                         }else if(!avi_owner.empty()){
@@ -340,6 +366,20 @@ static void encoder_worker(){
                                 recording_failed=1; running=0;
                             }
                         }
+                        // 新会话刚开：把触发前攒下的帧按时间顺序先写进 AVI，
+                        // 这样视频也和 frames.csv 一样带 preroll，起飞瞬间不会缺头。
+                        if(flush_preroll && avi.is_open()){
+                            const size_t n=preroll_ring.size();
+                            for(auto& pf:preroll_ring){
+                                if(!avi.write(recording_dir,pf.jpg.data(),pf.jpg.size(),pf.pts)){
+                                    recording_failed=1; running=0; break;
+                                }
+                                g_log.on_video(avi_index++,pf.fid,pf.cap_us,pf.pts);
+                            }
+                            preroll_ring.clear();
+                            preroll_bytes=0;
+                            DIAGF(gt::kDiagLog,"VIDEO_PREROLL flushed=%zu 帧\n",n);
+                        }
                         if(avi.is_open()){
                             if(!avi.write(recording_dir,jpg.data(),jpg.size(),frame.stVFrame.u64PTS)){
                                 recording_failed=1;
@@ -347,6 +387,13 @@ static void encoder_worker(){
                             }else{
                                 g_log.on_video(avi_index++,fid,cap_us,frame.stVFrame.u64PTS);
                             }
+                        }else if(g_video_preroll_ms>0 && g_log.running() && g_log.trigger_mode()){
+                            // 触发式记录、还没到触发点：把这一帧留在环形缓冲里等起飞
+                            preroll_bytes+=jpg.size();
+                            preroll_ring.push_back(PreRollFrame{
+                                std::vector<unsigned char>(jpg.begin(),jpg.end()),fid,cap_us,
+                                frame.stVFrame.u64PTS});
+                            preroll_trim(cap_us);
                         }
                     }
                     {
@@ -615,6 +662,7 @@ int main(int argc,char** argv){
         lc.mcu_stream=log_mcu_stream;   // 默认 false：frames.csv 单文件即成品表
         lc.dir=log_dir;
         lc.preroll_ms=static_cast<int>(log_preroll);
+        g_video_preroll_ms=log_preroll;   // 视频预录窗口跟数据预录保持一致
         lc.postroll_ms=static_cast<int>(log_postroll);
         lc.max_seconds=static_cast<int>(log_maxsec);
         char mbuf[512];
