@@ -11,7 +11,10 @@
 #   sh /tmp/board_uart_check.sh /dev/ttyS2 # 指定设备
 #   sh /tmp/board_uart_check.sh -k         # 不停止相机（相机在跑时字节会被它读走，仅看计数）
 set -u
-ROOT=${FLY_ROOT:-/code/fly_LicheeRV}
+# 板端根目录：默认按脚本自身位置推（<root>/tools/board/x.sh → <root>），
+# 也可以用 FLY_ROOT 覆盖
+ROOT=${FLY_ROOT:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}
+[ -n "$ROOT" ] || ROOT=/code/fly_LicheeRV
 KEEP_CAM=0
 DEV=""
 for a in "$@"; do

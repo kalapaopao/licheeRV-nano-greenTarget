@@ -98,6 +98,12 @@ tools/gen_row_life.py    生成「一行数据的一生」流程图（两个时�
 tools/gen_frame_timeline.py  生成「两个数据流的时间轴」（100Hz 电控 vs 80Hz 相机怎么错位）
 tools/gen_thread_dataflow.py 生成「线程间数据流与共享结构」（谁写谁读、锁保护哪一步）
 tools/gen_architecture_diagram.py 在原图上补画线程/记录器/诊断分区（架构图生成）
+tools/board/            板端运维脚本（随仓库维护，部署到 <root>/tools/board/，见该目录 README）
+  ├─ board_uart_check.sh     串口链路四层诊断（内核计数/抓包/引脚电平/设备树）
+  ├─ board_verify_no_files.sh 验收：待机时 record/ 必须为空
+  ├─ board_verify_trigger.sh  验收：假电控触发后会话目录五件齐全
+  ├─ board_check_session.sh   查会话开关原因（close_reason/行数/视频区间）
+  └─ board_slim.sh            板端瘦身（删文档/旧数据/备份，保留 tools/）
 
 tests/                  单元测试与仿真（见第 7 节）
 status.sh               一条命令看板端状态（进程/温度/历史/最近记录）
