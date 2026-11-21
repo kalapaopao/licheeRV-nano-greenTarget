@@ -1,6 +1,6 @@
 # 板端运维脚本（拷贝到板子 `/code/fly_LicheeRV/tools/board/` 下用）
 
-这五个脚本是**在板子上跑**的，用来验收、诊断、瘦身。它们不属于运行必需文件，
+这六个脚本是**在板子上跑**的，用来验收、诊断、瘦身。它们不属于运行必需文件，
 但出问题时比 ssh 手敲命令快得多，所以跟着仓库一起维护、一起部署。
 
 ## 部署（在 Windows / WSL 上）
@@ -15,10 +15,12 @@ scp -i $env:USERPROFILE\.ssh\licheepi_root_ed25519 `
 脚本会自己按 `../..` 推断项目根目录（也可以用 `FLY_ROOT=/code/fly_LicheeRV` 覆盖），
 所以放在 `<root>/tools/board/` 下直接 `sh` 就行。
 
-## 五个脚本
+## 六个脚本
 
 | 脚本 | 什么时候用 | 用法 |
 |---|---|---|
+| `uart_listen.py` | **只想看电控到底有没有发数据**：只读串口，把每一帧打印到终端，不碰相机、不写文件 | `sh stop.sh` 先停相机，然后<br>`python3 tools/board/uart_listen.py`（默认 `/dev/ttyS1`）<br>`python3 tools/board/uart_listen.py /dev/ttyS2`<br>Ctrl-C 退出 |
+| `verify_listen.sh` | 自检上面那个监听器：先用假电控（PTY）跑一遍证明能打印，再打真串口看有没有数据 | `sh tools/board/verify_listen.sh` |
 | `board_uart_check.sh` | **收不到电控数据时第一时间跑**。四层一次查完：① 各 UART 内核 rx/tx 计数 ② 停相机后抓 3 秒原始字节 + hexdump ③ UART1_RX 焊盘电平高速采样（判线上有没有跳变）④ 设备树 serial 节点 / pinctrl / gpiochip，最后直接给结论 | `sh tools/board/board_uart_check.sh`<br>`sh ... /dev/ttyS2`（指定设备）<br>`sh ... -k`（不停相机） |
 | `board_verify_no_files.sh` | 验收「没触发就不产生文件」：只启动不触发跑 20 秒，检查 `record/` 是否为空 | `sh tools/board/board_verify_no_files.sh` |
 | `board_verify_trigger.sh` | 验收「一次飞行一个文件夹」：用 PTY 假电控触发，检查会话目录里 `frames.csv` / `video.avi` / `video_frames.csv` / `health.csv` / `meta.txt` 是否齐全 | `sh tools/board/board_verify_trigger.sh`（需要 `/tmp/fake_mcu_pty.py`） |
