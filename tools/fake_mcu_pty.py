@@ -29,6 +29,9 @@ def frame(seq: int, state: int, flags: int, roll: float, pitch: float, yaw: floa
 
 def main() -> int:
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
+    # 第二个参数是可选的"周期秒数"：给了就循环（静止/飞行/停止 10+6+4），
+    # 用来测 auto_restart 的多次起飞；不给就是老的单次行为。
+    cycle = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0
     master, slave = pty.openpty()
     path = os.ttyname(slave)
     with open("/tmp/mcu_pty_path", "w") as f:
@@ -39,15 +42,20 @@ def main() -> int:
     t0 = time.time()
     while time.time() - t0 < seconds:
         el = time.time() - t0
-        # 15s 静止（等相机起来）→ 6s 飞行 → 4s 撞击后停止 → 回到静止
-        if el < 15.0:
-            state = 0
-        elif el < 21.0:
-            state = 1
-        elif el < 25.0:
-            state = 2
+        if cycle > 0.0:
+            # 循环模式：每 20s 一轮（10s 静止 / 6s 飞行 / 4s 停止）
+            e = el % cycle
+            state = 0 if e < 10.0 else (1 if e < 16.0 else (2 if e < 20.0 else 0))
         else:
-            state = 0
+            # 单次模式：15s 静止（等相机起来）→ 6s 飞行 → 4s 撞击后停止 → 回到静止
+            if el < 15.0:
+                state = 0
+            elif el < 21.0:
+                state = 1
+            elif el < 25.0:
+                state = 2
+            else:
+                state = 0
         t = el
         f = frame(seq, state, 0x07, 1.0 + t, -2.0, 3.5, 4.0, -5.25, 6.75)
         try:

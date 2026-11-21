@@ -1,6 +1,8 @@
 #!/bin/sh
 # Standalone GC4653 / 80 FPS / 3000us; optional native MJPEG AVI recording.
 set -eu
+# 原样记住调用参数：auto_restart 时用 exec 重新执行自己，要能把参数带过去
+ORIG_ARGS="$*"
 ROOT=/code/fly_LicheeRV
 CONFIG=${FLY_CONFIG_FILE:-$ROOT/config.yaml}
 # Auto-boot mode: use a dedicated always-on config, do not disturb the
@@ -99,6 +101,11 @@ LOG_MAX_SECONDS=30
 LOG_MCU_STREAM=false
 # 一次飞行（会话）归档完就退出进程，不常驻待命（省电降温）
 EXIT_AFTER_LAND=false
+# 落地归档后自动重启（配合 exit_after_land=true 做不断电二次起飞）
+AUTO_RESTART=false
+AUTO_RESTART_MAX=0        # 最多跑到第几轮：0 = 不限，1 = 只跑一轮（等于不重启）
+AUTO_RESTART_DELAY_S=3    # 相机退出后等几秒再拉起
+AUTO_RESTART_COOL_MILLIC=70000   # 重启前若温度高于此值，先等它降下来
 # ---- 诊断：分类打印开关（默认全开，等于与改动前一样）+ 运行状态历史目录 ----
 STATE_DIR=
 PRINT_ENABLE=true
@@ -187,6 +194,10 @@ while IFS= read -r line || [ -n "$line" ]; do
         log_max_seconds) LOG_MAX_SECONDS=$value;;
         log_mcu_stream) LOG_MCU_STREAM=$value;;
         exit_after_land) EXIT_AFTER_LAND=$value;;
+        auto_restart) AUTO_RESTART=$value;;
+        auto_restart_max) AUTO_RESTART_MAX=$value;;
+        auto_restart_delay_s) AUTO_RESTART_DELAY_S=$value;;
+        auto_restart_cool_millic) AUTO_RESTART_COOL_MILLIC=$value;;
         state_dir) STATE_DIR=$value;;
         print_enable) PRINT_ENABLE=$value;;
         print_boot) PRINT_BOOT=$value;;
@@ -255,6 +266,10 @@ validate_integer log_postroll_ms "$LOG_POSTROLL_MS" 0 10000
 validate_integer log_max_seconds "$LOG_MAX_SECONDS" 1 300
 case "$LOG_MCU_STREAM" in true|false) ;; *) config_error 'log_mcu_stream must be true or false';; esac
 case "$EXIT_AFTER_LAND" in true|false) ;; *) config_error 'exit_after_land must be true or false';; esac
+case "$AUTO_RESTART" in true|false) ;; *) config_error 'auto_restart must be true or false';; esac
+validate_integer auto_restart_max "$AUTO_RESTART_MAX" 0 1000
+validate_integer auto_restart_delay_s "$AUTO_RESTART_DELAY_S" 0 60
+validate_integer auto_restart_cool_millic "$AUTO_RESTART_COOL_MILLIC" 0 90000
 # trigger 模式靠电控 STATE 边沿触发；没有串口就永远不会有边沿，直接拒绝而不是静默空记
 [ "$LOG_ENABLE" = "true" ] && [ "$LOG_MODE" = "trigger" ] && [ "$UART_ENABLE" != "true" ] && \
     config_error 'log_mode=trigger requires uart_enable=true (use log_mode=continuous otherwise)'
@@ -513,14 +528,37 @@ cam_alive() {
     [ "$(awk '{print $3}' "/proc/$1/stat" 2>/dev/null)" != "Z" ]
 }
 
-sleep 7
+# 等相机就绪：轮询日志里的就绪标记，最长 10 秒。
+# 原来是死等 7 秒（sleep 7）—— 相机通常 2~3 秒就 ready 了，白等 4~5 秒；
+# 有了 auto_restart（落地后自动重启）以后这个浪费会落到每一轮上，所以改成轮询：
+# 一就绪就走，慢的时候也不会比以前更差（以前 7 秒就往下走，可能其实还没好）。
+cam_ready() {
+    grep -q '^CAMERA_READY' "$LOG" 2>/dev/null || return 1
+    if [ "$EXPOSURE_MODE" = manual ]; then
+        grep -q "^EXPOSURE_SET us=$MANUAL_EXP_US .*rc=0$" "$LOG" 2>/dev/null || return 1
+    else
+        grep -q '^RECORD80_AE_AUTO_LIMIT .*rc=0x0$' "$LOG" 2>/dev/null || return 1
+    fi
+    return 0
+}
+READY_WAIT=0
+while [ "$READY_WAIT" -lt 10 ]; do
+    cam_alive "$CAM_PID" || { echo CAMERA_EXITED_EARLY; tail -15 "$LOG"; exit 5; }
+    cam_ready && break
+    sleep 1
+    READY_WAIT=$((READY_WAIT + 1))
+done
 cam_alive "$CAM_PID" || { echo CAMERA_EXITED_EARLY; tail -15 "$LOG"; exit 5; }
-grep -q '^CAMERA_READY' "$LOG" || { echo CAMERA_NOT_READY; tail -15 "$LOG"; exit 5; }
-if [ "$EXPOSURE_MODE" = manual ]; then
-    grep -q "^EXPOSURE_SET us=$MANUAL_EXP_US .*rc=0$" "$LOG" || { echo EXPOSURE_NOT_APPLIED; tail -15 "$LOG"; exit 5; }
-else
-    grep -q '^RECORD80_AE_AUTO_LIMIT .*rc=0x0$' "$LOG" || { echo AUTO_EXPOSURE_NOT_APPLIED; tail -15 "$LOG"; exit 5; }
+if ! cam_ready; then
+    if [ "$EXPOSURE_MODE" = manual ]; then
+        grep -q '^CAMERA_READY' "$LOG" || { echo CAMERA_NOT_READY; tail -15 "$LOG"; exit 5; }
+        echo EXPOSURE_NOT_APPLIED; tail -15 "$LOG"; exit 5
+    else
+        grep -q '^CAMERA_READY' "$LOG" || { echo CAMERA_NOT_READY; tail -15 "$LOG"; exit 5; }
+        echo AUTO_EXPOSURE_NOT_APPLIED; tail -15 "$LOG"; exit 5
+    fi
 fi
+echo "CAMERA_READY_WAIT=${READY_WAIT}s"
 ERROR_BEFORE=$(awk '/^[ ]*0[ ]+[0-9]+[ ]+[0-9]+[ ]+[0-9]+/{print $2,$3,$4,$5,$6;exit}' /proc/mipi-rx)
 # If the supervisor is forcibly killed, recover its camera and clock at the deadline.
 # Ownership checks prevent an old guard from killing a new session or touching its clock.
@@ -563,6 +601,53 @@ else
 fi
 CAM_STARTED=1
 note ready "web=$([ "$HTTP_ENABLE" = "true" ] && [ "$DISPLAY_ENABLE" = "true" ] && echo "$WEB_IP" || echo off) cam_pid=$CAM_PID fps_target=80"
+
+# ---------------------------------------------------------------------------
+# 落地归档后自动重启：不断电做第二次起飞
+# ---------------------------------------------------------------------------
+# 为什么需要它：exit_after_land=true 时，落地后相机进程退出、本脚本也随之退出，
+# 想再飞一次就得重新 ssh / 敲命令 —— 赛场不现实。
+# 但也不能简单地改成"永不退出"：那样落地后相机一直 80fps 全速跑，白烧电、白发热
+# （74.5°C 就会被动停机），而且赛事间隔里根本不需要视觉。
+#
+# 所以做法是：落地 → 归档 → 相机退出（释放 VI/ISP/VENC，开始降温）
+#           → 等 auto_restart_delay_s 秒 → exec 重新执行本脚本 → 干净的下一轮待命。
+# 用 exec 而不是 fork：进程号不变、不会累积，每一轮都是全新初始化的相机。
+# 代价是一段"盲区"（重启 + 相机初始化约 2~4 秒），装填飞镖远不止这么久，可以接受。
+#
+# 只有 landed_exit 会重启。崩溃/过热/MIPI 异常一律不自动重启 —— 那些是真问题，
+# 自动重启只会把故障藏起来。
+restart_after_land() {
+    if [ "$AUTO_RESTART" != true ]; then
+        echo "AUTO_RESTART_DISABLED (auto_restart=false，按配置结束)"
+        return 0
+    fi
+    ROUND=$(( ${AUTO_RESTART_ROUND:-1} + 1 ))
+    if [ "$AUTO_RESTART_MAX" -gt 0 ] && [ "$ROUND" -gt "$AUTO_RESTART_MAX" ]; then
+        echo "AUTO_RESTART_STOP round=$ROUND max=$AUTO_RESTART_MAX (已达上限)"
+        note supervisor_exit "reason=auto_restart_limit round=$ROUND"
+        return 0
+    fi
+    # 重启前先等温度降下来：刚落地的板子往往最热，热着再拉起来很快会撞 74.5°C
+    T=$(cat /sys/class/thermal/thermal_zone0/temp)
+    if [ "$T" -ge "$AUTO_RESTART_COOL_MILLIC" ]; then
+        echo "AUTO_RESTART_COOLDOWN temp_millic=$T 等降到 $AUTO_RESTART_COOL_MILLIC 以下"
+        n=0
+        while [ "$T" -ge "$AUTO_RESTART_COOL_MILLIC" ] && [ "$n" -lt 150 ]; do
+            sleep 2
+            n=$((n + 1))
+            T=$(cat /sys/class/thermal/thermal_zone0/temp)
+        done
+        echo "AUTO_RESTART_COOLDOWN_DONE temp_millic=$T waited=$((n * 2))s"
+    fi
+    echo "AUTO_RESTART round=$ROUND delay=${AUTO_RESTART_DELAY_S}s (落地已归档，重新拉起相机待命)"
+    note supervisor_exit "reason=auto_restart round=$ROUND"
+    # 先把锁交出去，避免上一轮的 guard 子进程在新一轮启动后误清理
+    rm -f "$LOCK/supervisor.pid" "$LOCK/camera.pid"
+    sleep "$AUTO_RESTART_DELAY_S"
+    AUTO_RESTART_ROUND=$ROUND exec "$0" $ORIG_ARGS
+}
+
 START=$(date +%s)
 LAST_STATS=''
 while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; do
@@ -573,8 +658,9 @@ while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; d
     cam_alive "$CAM_PID" || {
         if grep -q 'EXIT_AFTER_LAND' "$LOG" 2>/dev/null; then
             EXIT_REASON=landed_exit
-            echo "CAMERA_EXIT_AFTER_LAND (会话已归档，按配置退出)"
+            echo "CAMERA_EXIT_AFTER_LAND (会话已归档)"
             note supervisor_exit "reason=landed_exit rc=0"
+            restart_after_land
             exit 0
         fi
         EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }

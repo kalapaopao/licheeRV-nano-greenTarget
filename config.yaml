@@ -176,6 +176,13 @@ log_mcu_stream: false
 # true = 落地 + postroll 后程序自己结束（省电降温，适合赛场单次发射）
 # false = 常驻待命，等下一次起飞（适合反复调试）
 exit_after_land: false
+# 落地归档后自动重启，不断电做第二次起飞（需要 exit_after_land: true 配套）。
+# 落地 → 归档 → 相机退出（释放 VI/ISP，开始降温）→ 等几秒 → 重新拉起待命。
+# 只有「落地收工」会重启；崩溃/过热/MIPI 异常一律不自动重启。
+auto_restart: false
+auto_restart_max: 0          # 最多跑到第几轮，0 = 不限；1 = 只跑一轮（等于不重启）
+auto_restart_delay_s: 3      # 相机退出后等几秒再拉起
+auto_restart_cool_millic: 70000   # 重启前若温度高于 70°C，先等它降下来
 # 记录目录；留空（注释掉）= 程序目录下的 logs/。必须是绝对路径。
 # log_dir: /code/fly_LicheeRV/logs
 
