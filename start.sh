@@ -1,4 +1,4 @@
-#!/bin/sh
+﻿#!/bin/sh
 # Standalone GC4653 / 80 FPS / 3000us; optional native MJPEG AVI recording.
 set -eu
 ROOT=/code/fly_LicheeRV
@@ -465,6 +465,29 @@ trap 'EXIT_REASON=interrupted; exit 130' INT
 export STATE_DIR
 export PRINT_ENABLE PRINT_BOOT PRINT_ISP PRINT_TARGET PRINT_PERF PRINT_UART PRINT_MCU PRINT_LOG PRINT_AVI
 note supervisor_start "config=$CONFIG duration=${DURATION:-?} display=$DISPLAY_ENABLE record=$RECORDING uart=$UART_ENABLE/$UART_TX_ENABLE log=$LOG_ENABLE/$LOG_MODE print=$PRINT_ENABLE"
+
+# ---- UART1 引脚复用 -------------------------------------------------------
+# Sipeed 官方文档：UART1/UART2 的引脚默认给蓝牙用。
+#   默认态：A28=UART1_TX   A29=UART1_RX   A18=UART1_CTS  A19=UART1_RTS
+# 我们接线在 A18/A19（板上标的就是这两根），所以每次启动都要把数据脚改过来：
+#   A18 → UART1 RX、A19 → UART1 TX（写 0x6）；此时 A28/A29 变成 UART2，不影响我们。
+# 这两个是易失寄存器，断电即恢复默认值，所以必须每次启动都写。
+# 参考：https://wiki.sipeed.com/hardware/zh/lichee/RV_Nano/5_peripheral.html（UART 一节）
+if [ "$UART_ENABLE" = "true" ] && [ "$UART_DEVICE" = "/dev/ttyS1" ]; then
+    A18_REG=0x03001068   # GPIOA18：4=UART1_CTS（默认）→ 6=UART1_RX
+    A19_REG=0x03001064   # GPIOA19：4=UART1_RTS（默认）→ 6=UART1_TX
+    V18=$(devmem "$A18_REG" 32 2>/dev/null)
+    V19=$(devmem "$A19_REG" 32 2>/dev/null)
+    if [ "$V18" != "0x00000006" ] || [ "$V19" != "0x00000006" ]; then
+        devmem "$A18_REG" 32 0x6 >/dev/null 2>&1
+        devmem "$A19_REG" 32 0x6 >/dev/null 2>&1
+        NEW18=$(devmem "$A18_REG" 32 2>/dev/null)
+        NEW19=$(devmem "$A19_REG" 32 2>/dev/null)
+        echo "UART1_PINMUX A18:$V18->$NEW18 A19:$V19->$NEW19 (6=UART1 RX/TX)"
+        note ready "uart1_pinmux A18=$NEW18 A19=$NEW19"
+    fi
+fi
+
 if [ "$RECORDING" -eq 1 ]; then
     RECORD_DIR="$ROOT/record"
     mkdir -p "$RECORD_DIR"
