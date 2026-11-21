@@ -909,6 +909,21 @@ int main(int argc,char** argv){
                     ae.stAuto.stExpTimeRange.u32Max=auto_exp;
                     if(ae.stAuto.stExpTimeRange.u32Min>auto_exp)ae.stAuto.stExpTimeRange.u32Min=auto_exp;
                 }
+                // auto 模式的曝光上限必须夹住，否则 AE 会为了提亮把曝光拉到几十毫秒：
+                // 80fps 的帧周期只有 12.5ms，实测 AE 在暗处选了 exp_us=33155（33ms），
+                // 结果是 host_fps 从 80 掉到 62，而且飞镖会被拖影彻底糊掉。
+                // 上限取 10ms（帧周期的 80%），给读出和编码留余量。
+                // 想做更长的曝光必须同时降帧率 —— 那是另一个功能，不在这里偷偷放开。
+                {
+                    const unsigned exp_budget=10000;   // us；80fps × 12.5ms 的 80%
+                    if(ae.stAuto.stExpTimeRange.u32Max>exp_budget){
+                        DIAGF(gt::kDiagIsp,"AE_EXP_CLAMP max=%u -> %u（80fps 帧周期只有 12.5ms）\n",
+                              ae.stAuto.stExpTimeRange.u32Max,exp_budget);
+                        ae.stAuto.stExpTimeRange.u32Max=exp_budget;
+                    }
+                    if(ae.stAuto.stExpTimeRange.u32Min>ae.stAuto.stExpTimeRange.u32Max)
+                        ae.stAuto.stExpTimeRange.u32Min=ae.stAuto.stExpTimeRange.u32Max;
+                }
                 if(auto_again){
                     ae.stAuto.stAGainRange.u32Max=auto_again;
                     if(ae.stAuto.stAGainRange.u32Min>auto_again)ae.stAuto.stAGainRange.u32Min=auto_again;
