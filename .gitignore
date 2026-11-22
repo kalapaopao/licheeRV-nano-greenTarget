@@ -41,3 +41,10 @@ third_party/
 *.bak
 *.bak_*
 backup/
+
+# Docker 交叉编译镜像的导出件（322MB，永远不入库）
+# 需要时用 docker/build-image.sh 现场生成，或用 docker save 自己导
+licheerv-build-image*
+*.tar.gz
+*.tgz
+docker/*.tar
