@@ -22,6 +22,7 @@
 |---|---|
 | `build-image.sh` | 暂存工具链/SDK → `docker build` → `docker save` 导出 tar.gz |
 | `compile.sh` | `docker run` 挂载本仓库 → 跑 `build.sh`，产物照旧落在 `build/bin/camera` |
+| `verify-roundtrip.sh` | 删掉本地镜像 → 从 tar.gz 重新 `docker load` → 再编译一次（验证搬运件本身可用） |
 
 两个都在 **WSL 里**用 `bash` 跑（不是 Windows PowerShell）。
 
@@ -78,11 +79,18 @@ wsl -e bash /mnt/e/study/LicheeRV/licheeRV-nano-greenTarget/docker/build-image.s
 
 | 项 | 结果 |
 |---|---|
+| `gzip -t` 校验导出文件完整性 | ✅ 通过 |
+| **删掉本地镜像后从 tar.gz 重新 `docker load`** | ✅ 通过，7 秒导入，镜像 `licheerv-build:1.0 1.69GB` |
+| 导入后的镜像里工具链版本正确 | ✅ `Xuantie-900 ... Toolchain V2.6.1 / gcc 10.2.0` |
+| 导入后的镜像能编译本工程 | ✅ `BUILD_OK` → `ELF 64-bit LSB executable, UCB RISC-V` |
 | 工具链可重定位（复制到 `/opt` 仍能出 RISC-V 可执行文件） | ✅ 实测通过 |
-| 镜像自检（构建时编译一个最小 C 程序并 `file` 验证） | ✅ 构建日志有 `TOOLCHAIN_SELFCHECK_OK` |
-| 容器内编译本工程，产出 `build/bin/camera` | ✅ 实测 `BUILD_OK`，`ELF 64-bit LSB executable, UCB RISC-V` |
-| 把 tar.gz 拷到另一台电脑并 `docker load` | ❌ **未验证**（需要第二台机器） |
-| 在 Docker Desktop（Windows 后端）下 bind mount 编译 | ❌ **未验证**（本机是 WSL 内的 docker 29.9.0） |
+| 镜像构建期自检（编译最小 C 程序并 `file` 验证） | ✅ 日志有 `TOOLCHAIN_SELFCHECK_OK` |
+| 在**另一台电脑**上 load（不同 Docker 版本/OS） | ❌ **未验证**（需要第二台机器） |
+| Docker Desktop（Windows 后端）下 bind mount 编译 | ❌ **未验证**（本机是 WSL 内的 docker 29.9.0） |
+
+> 「删掉镜像再从 tar.gz 导入」这一步就是 `verify-roundtrip.sh`，
+> 它模拟了换机场景，除"不同机器的 Docker 版本"外都已覆盖。
+> 想看结果随时重跑：`wsl -e bash .../docker/verify-roundtrip.sh`
 
 ## 已知注意点
 
