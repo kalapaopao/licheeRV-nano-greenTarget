@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>飞行记录查看器 · 导入即看</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#0f172a;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+ font:14px/1.55 "Segoe UI",system-ui,-apple-system,"Microsoft YaHei",sans-serif;
+ -webkit-font-smoothing:antialiased}
+.wrap{max-width:1260px;margin:0 auto;padding:24px 20px 60px}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--muted);font-size:12.5px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+ padding:16px 18px;box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.mb{margin-bottom:16px}
+/* 导入区 */
+#drop{border:2px dashed #cbd5e1;border-radius:14px;background:#fff;
+ padding:30px 22px;text-align:center;transition:.15s;cursor:pointer}
+#drop.hot{border-color:var(--accent);background:#eff6ff}
+#drop .big{font-size:16px;font-weight:600;margin-bottom:6px}
+#drop .sm{font-size:12.5px;color:var(--muted);line-height:1.8}
+.row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+button{font:inherit;padding:7px 14px;border-radius:9px;border:1px solid var(--line);
+ background:#fff;color:var(--ink);cursor:pointer}
+button:hover{background:#f3f4f6}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+button.primary:hover{background:#1d4ed8}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}
+#status{font-size:12.5px;color:var(--muted);margin-top:12px;min-height:18px}
+.chips{display:flex;gap:7px;flex-wrap:wrap;justify-content:center;margin-top:10px}
+.chip{font-size:11.5px;padding:2px 9px;border-radius:999px;background:#f1f5f9;color:#475569}
+.chip.ok{background:#dcfce7;color:#15803d}
+.chip.warn{background:#fef3c7;color:#b45309}
+.chip.bad{background:#fee2e2;color:#b91c1c}
+/* 会话选择 */
+#sessions{display:none;gap:10px;align-items:center;flex-wrap:wrap}
+select{font:inherit;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:#fff}
+/* 指标卡 */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.metric{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;
+ box-shadow:0 1px 2px rgba(16,24,40,.04)}
+.m-label{font-size:12px;color:var(--muted);margin-bottom:6px}
+.m-value{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:.3px}
+.m-sub{font-size:11.5px;color:var(--muted);margin-top:5px}
+/* 播放器 */
+.grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(270px,.85fr);gap:16px;margin-bottom:16px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+video{width:100%;display:block;border-radius:10px;background:#0b0f14}
+.novideo{aspect-ratio:16/9;border-radius:10px;background:#0b0f14;color:#94a3b8;
+ display:flex;align-items:center;justify-content:center;text-align:center;font-size:13px;padding:20px}
+.bar{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 11px}
+.seg button.on{background:#e8f0fe;color:#1d4ed8;font-weight:600}
+.pill{font-size:12px;color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}
+.slider{width:100%;margin-top:12px;accent-color:var(--accent)}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 14px;font-size:13px;
+ font-variant-numeric:tabular-nums;align-items:start}
+.kv dt{color:var(--muted);white-space:nowrap}
+.kv dd{margin:0;font-weight:600;overflow-wrap:anywhere;min-width:0}
+.kv dd.soft{font-size:11px;color:var(--muted);font-weight:400;line-height:1.45}
+.badge{display:inline-block;padding:1.5px 9px;border-radius:999px;color:#fff;font-size:12px;font-weight:600}
+.hit{color:#16a340;font-weight:600}
+/* 图表 */
+.panel{width:100%;height:auto;display:block;overflow:hidden}
+.yt,.xt{font-size:10.5px;fill:var(--muted);font-variant-numeric:tabular-nums}
+.pt{font-size:12px;fill:#374151;font-weight:600}
+.pu{font-size:10.5px;fill:#9ca3af}
+.legend{display:flex;gap:15px;padding:2px 0 10px;flex-wrap:wrap}
+.lg{font-size:11.5px;color:#4b5563;display:inline-flex;align-items:center;gap:6px}
+.lg i{width:12px;height:3px;border-radius:2px}
+.hint{font-size:12px;color:var(--muted);margin:0 0 10px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:5px 10px;border-bottom:1px solid #f1f2f4;vertical-align:top}
+th{color:var(--muted);font-weight:500;width:190px}
+td{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+#viewer{display:none}
+code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>飞行记录查看器</h1>
+<div class="sub">拖入会话文件夹即自动识别渲染 · 纯本地运行，数据不上传 · 视频与数据按帧号对齐</div>
+
+<div class="card mb" id="importCard">
+  <div id="drop">
+    <div class="big">把飞行会话文件夹拖到这里</div>
+    <div class="sm">
+      例如 <code>sess_454s_395_001</code>，或整个 <code>record</code> 目录（会自动列出所有会话）<br>
+      自动识别 <code>frames.csv</code> · <code>video_frames.csv</code> · <code>meta.txt</code> · <code>video.mp4</code> · <code>mcu.csv</code> · <code>health.csv</code><br>
+      ⚠ 浏览器不能播放 AVI/MJPEG；想看视频请一并导入转好的 <code>video.mp4</code>，没有视频也能看全部数据图表
+    </div>
+    <div class="row">
+      <button class="primary" id="btnDir">选择文件夹</button>
+      <button id="btnFiles">选择文件（可多选）</button>
+    </div>
+    <input type="file" id="inDir" webkitdirectory directory multiple>
+    <input type="file" id="inFiles" multiple
+      accept=".csv,.txt,.mp4,.avi,.json">
+    <div class="chips" id="chips"></div>
+    <div id="status">浏览器出于安全限制不能自己扫描硬盘，需要你选一次目录；之后全部自动。</div>
+  </div>
+  <div id="sessions" style="margin-top:14px">
+    <span style="font-size:12.5px;color:var(--muted)">发现多个会话，选择要查看的：</span>
+    <select id="selSession"></select>
+    <button id="btnLoad">加载</button>
+  </div>
+</div>
+
+<div id="viewer">
+  <div class="metrics" id="metrics"></div>
+
+  <div class="grid">
+    <div class="card">
+      <video id="v" controls preload="auto" playsinline style="display:none"></video>
+      <div class="novideo" id="novideo" style="display:none"></div>
+      <div class="bar">
+        <button id="prev">◀ 上一帧</button>
+        <button id="play" class="primary">播放</button>
+        <button id="next">下一帧 ▶</button>
+        <span class="seg" id="spd">
+          <button data-r="0.25">0.25×</button><button data-r="0.5">0.5×</button>
+          <button data-r="1" class="on">1×</button>
+        </span>
+        <span class="pill" id="pos">—</span>
+      </div>
+      <input type="range" class="slider" id="slider" min="0" max="1" step="1" value="0">
+      <p class="hint" style="margin:10px 0 0" id="alignHint"></p>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <span style="font-weight:600">当前帧数据</span>
+        <span class="badge" id="badge" style="background:#94a3b8">—</span>
+      </div>
+      <dl class="kv">
+        <dt>frame_id</dt><dd class="big" id="k_fid">—</dd>
+        <dt>视频帧号</dt><dd id="k_avi">—</dd>
+        <dt>视频时刻</dt><dd id="k_vt">—</dd>
+        <dt>采集时刻</dt><dd id="k_t">—</dd>
+        <dt>偏差</dt><dd class="soft" id="k_drift">—</dd>
+        <dt>滚转/俯仰/偏航</dt><dd id="k_rpy">—</dd>
+        <dt>角速度 gx/gy/gz</dt><dd id="k_g">—</dd>
+        <dt>电控年龄</dt><dd id="k_age">—</dd>
+        <dt>检测耗时</dt><dd id="k_det">—</dd>
+        <dt>检测目标</dt><dd id="k_hit">—</dd>
+      </dl>
+    </div>
+  </div>
+
+  <div class="card mb">
+    <p class="hint">灰=静止 · 蓝=飞行 · 黄=落地后　｜　红色竖线=当前帧　｜　点图可跳到那一帧　｜　鼠标悬停可看读数</p>
+    <div id="panels"></div>
+  </div>
+
+  <div class="card mb" id="metaCard" style="display:none">
+    <h2 style="font-size:14px;font-weight:600;margin:0 0 12px;color:#374151">会话信息（meta.txt）</h2>
+    <table id="metaTable"></table>
+  </div>
+</div>
+
+</div>
+<script>
+"use strict";
+// =====================================================================
+// 飞行记录查看器：纯前端导入 + 渲染
+// 对齐链（沿用已验证的 flight_sync_player.py）：
+//   视频帧号 avi_index = floor(currentTime * fps)
+//            -> video_frames.csv[avi_index].frame_id
+//            -> frames.csv 里 frame_id 相同的那一行
+// 绝不按播放时间对齐：录制时编码会丢帧，AVI 是恒定帧率封装，
+// 实测播放时刻与真实采集时刻能差 1.6 秒。
+// =====================================================================
+const C = {
+  roll:"#2563eb", pitch:"#059669", yaw:"#d97706",
+  gx:"#db2777", gy:"#0891b2", gz:"#7c3aed",
+  age:"#0ea5e9", det:"#8b5cf6", fdt:"#f97316",
+  grid:"#eef1f5", axis:"#cbd5e1",
+  static:"#f1f3f6", flight:"#e8f0fe", stop:"#fff5e0"
+};
+const STATE = {0:"STATIC",1:"FLIGHT",2:"STOP","-1":"无数据"};
+const STATE_COLOR = {0:"#64748b",1:"#2563eb",2:"#d97706","-1":"#94a3b8"};
+const W=1160, ML=62, MR=18, MT=16, MB=26;
+
+const $ = id => document.getElementById(id);
+const nf = (v,d=1) => (v===null||v===undefined||!Number.isFinite(v)) ? "—" : Number(v).toFixed(d);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+// ---------------------------------------------------------------- 文件收集
+let ALL_FILES = [];     // {file, path}
+let SESSIONS = [];      // {name, files:{basename:File}}
+let S = null;           // 当前会话的解析结果
+
+function basename(p){ return String(p).split(/[\\/]/).pop(); }
+function dirname(p){ const s=String(p).replace(/\\/g,"/"); const i=s.lastIndexOf("/"); return i<0?"":s.slice(0,i); }
+
+async function collectFromDataTransfer(dt){
+  const out=[];
+  const items=[...dt.items].filter(x=>x.kind==="file");
+  const entries=items.map(x=>x.webkitGetAsEntry&&x.webkitGetAsEntry()).filter(Boolean);
+  async function walk(e,prefix){
+    if(e.isFile){
+      const f=await new Promise(r=>e.file(r));
+      out.push({file:f,path:(e.fullPath||prefix+e.name).replace(/^\//,"")});
+    }else if(e.isDirectory){
+      const rd=e.createReader(); let batch;
+      do{
+        batch=await new Promise(r=>rd.readEntries(r));
+        for(const c of batch)await walk(c,prefix);
+      }while(batch.length);
+    }
+  }
+  if(entries.length){ for(const e of entries)await walk(e,""); }
+  else { for(const f of dt.files)out.push({file:f,path:f.name}); }
+  return out;
+}
+function collectFromFileList(list){
+  return [...list].map(f=>({file:f,path:f.webkitRelativePath||f.name}));
+}
+
+function groupSessions(all){
+  // 以「含 frames.csv 的目录」为一个会话
+  const dirs=new Map();
+  for(const x of all){
+    const d=dirname(x.path);
+    if(!dirs.has(d))dirs.set(d,[]);
+    dirs.get(d).push(x);
+  }
+  const out=[];
+  for(const [d,arr] of dirs){
+    if(!arr.some(x=>basename(x.path)==="frames.csv"))continue;
+    const files={};
+    for(const x of arr)files[basename(x.path)]=x.file;
+    out.push({name:(d.split("/").pop()||"会话")+"  ("+(d||".")+")",files});
+  }
+  out.sort((a,b)=>a.name.localeCompare(b.name));
+  return out;
+}
+
+function chips(list){
+  $("chips").innerHTML = list.map(([txt,cls])=>`<span class="chip ${cls}">${txt}</span>`).join("");
+}
+
+async function ingest(all){
+  ALL_FILES=all;
+  SESSIONS=groupSessions(all);
+  const found=[];
+  for(const n of ["frames.csv","video_frames.csv","meta.txt","video.mp4","video.avi","mcu.csv","health.csv"]){
+    const has=all.some(x=>basename(x.path)===n);
+    found.push([n + (has?" ✓":" 缺失"), has?"ok":(n==="frames.csv"?"bad":"warn")]);
+  }
+  chips(found);
+  if(!SESSIONS.length){
+    $("status").textContent="没有找到含 frames.csv 的会话目录。请拖入 sess_xxx 文件夹（或包含它的 record 目录）。";
+    $("sessions").style.display="none";
+    return;
+  }
+  $("status").textContent=`找到 ${SESSIONS.length} 个会话，共 ${all.length} 个文件。`;
+  if(SESSIONS.length===1){
+    $("sessions").style.display="none";
+    await loadSession(SESSIONS[0]);
+  }else{
+    $("selSession").innerHTML=SESSIONS.map((s,i)=>`<option value="${i}">${esc(s.name)}</option>`).join("");
+    $("sessions").style.display="flex";
+    $("status").textContent+= " 请选择要查看的会话。";
+    await loadSession(SESSIONS[0]);
+  }
+}
+
+// ---------------------------------------------------------------- 解析
+function parseCSV(text){
+  const lines=text.replace(/\r/g,"").split("\n").filter(l=>l.trim().length);
+  if(!lines.length)return {cols:[],rows:[]};
+  // 我们的 CSV 无引号字段；仍做一次稳妥的简单切分
+  const split=l=>l.split(",");
+  const cols=split(lines[0]).map(s=>s.trim());
+  const rows=[];
+  for(let i=1;i<lines.length;i++){
+    const p=split(lines[i]); const o={};
+    for(let j=0;j<cols.length;j++){
+      const v=(p[j]??"").trim();
+      const num=Number(v);
+      o[cols[j]] = (v!=="" && Number.isFinite(num)) ? num : (v===""||v==="nan"||v==="NaN"?null:v);
+    }
+    rows.push(o);
+  }
+  return {cols,rows};
+}
+function parseMeta(text){
+  const o={};
+  for(const l of text.split("\n")){
+    if(!l.includes("=")||l.trim().startsWith("#"))continue;
+    const i=l.indexOf("="); o[l.slice(0,i).trim()]=l.slice(i+1).trim();
+  }
+  return o;
+}
+const readText = f => f.text();
+
+function niceTicks(lo,hi,target){
+  if(!Number.isFinite(lo)||!Number.isFinite(hi)||hi<=lo)return [lo];
+  const raw=(hi-lo)/Math.max(1,target), mag=Math.pow(10,Math.floor(Math.log10(raw)));
+  let step=mag*10;
+  for(const m of [1,2,2.5,5,10])if(raw<=m*mag){step=m*mag;break;}
+  const out=[]; let v=Math.ceil(lo/step)*step;
+  while(v<=hi+step*1e-9){out.push(Number(v.toFixed(10)));v+=step;}
+  return out;
+}
+
+async function loadSession(sess){
+  const F=sess.files;
+  $("status").textContent="正在解析 "+sess.name+" …";
+  const frames=(await readText(F["frames.csv"]));
+  const {cols,rows}=parseCSV(frames);
+  if(!rows.length||!cols.includes("capture_us")){
+    $("status").textContent="frames.csv 格式不对（缺 capture_us）。"; return;
+  }
+
+  let vfRows=[], hasVf=false;
+  if(F["video_frames.csv"]){
+    const r=parseCSV(await readText(F["video_frames.csv"]));
+    if(r.cols.includes("avi_index")&&r.rows.length){vfRows=r.rows;hasVf=true;}
+  }
+  let meta={};
+  if(F["meta.txt"])meta=parseMeta(await readText(F["meta.txt"]));
+
+  const t0=rows[0].capture_us;
+  const t=rows.map(r=>(r.capture_us-t0)/1e6);
+  const xhi=t[t.length-1];
+  const fid0=rows[0].frame_id;
+  const st=rows.map(r=>r.mcu_state===null||r.mcu_state===undefined?-1:Number(r.mcu_state));
+
+  // 相位色带
+  const bands=[]; let prev=st[0],a0=0;
+  for(let i=1;i<st.length;i++)if(st[i]!==prev){
+    bands.push([a0,t[i],prev===1?C.flight:prev===2?C.stop:C.static]);
+    a0=t[i];prev=st[i];
+  }
+  bands.push([a0,xhi,prev===1?C.flight:prev===2?C.stop:C.static]);
+
+  const fl=st.findIndex((v,i)=>v===1&&(i===0||st[i-1]!==1));
+  const sp=st.findIndex((v,i)=>v===2&&(i===0||st[i-1]!==2));
+  const tFl=fl>=0?t[fl]:null, tSp=sp>=0?t[sp]:null;
+
+  // 视频帧 -> 数据行
+  let fps=null,nAvi=0,rowOfAvi=[];
+  if(hasVf){
+    const pts=vfRows.map(r=>r.pts_raw).filter(Number.isFinite);
+    if(pts.length>1&&pts[pts.length-1]>pts[0])
+      fps=(vfRows.length-1)*1e6/(pts[pts.length-1]-pts[0]);
+    nAvi=vfRows.length;
+    rowOfAvi=vfRows.map(r=>{
+      const k=Math.round(Number(r.frame_id)-fid0);
+      return (k>=0&&k<rows.length)?k:null;
+    });
+  }
+
+  // 视频文件（优先 mp4）
+  let videoUrl=null,videoKind="";
+  if(F["video.mp4"]){videoUrl=URL.createObjectURL(F["video.mp4"]);videoKind="mp4";}
+  else if(F["video.avi"]){videoKind="avi";}
+
+  // 若导入的是 mp4 但没侧车，用容器时长估 fps（精度差，会提示）
+  let approxFps=false;
+  if(videoKind==="mp4"&&!hasVf){approxFps=true;}
+
+  const dt=[];
+  for(let i=1;i<rows.length;i++)dt.push((rows[i].capture_us-rows[i-1].capture_us)/1e3);
+
+  S={sess,cols,rows,t,xhi,fid0,st,bands,tFl,tSp,fps,nAvi,rowOfAvi,
+     videoUrl,videoKind,hasVf,approxFps,dt,meta,vfRows};
+
+  $("viewer").style.display="block";
+  $("importCard").style.display="block";
+  render();
+  $("status").textContent=`已加载 ${sess.name}：${rows.length} 帧数据`+
+    (hasVf?`，${nAvi} 个视频帧`:"")+
+    (videoKind==="mp4"?"，视频已就绪":videoKind==="avi"?"，仅 AVI（浏览器不能播，已切换为纯数据模式）":"，无视频");
+  // 滚动到结果
+  $("viewer").scrollIntoView({behavior:"smooth",block:"start"});
+}
+
+// ---------------------------------------------------------------- 渲染
+function render(){
+  const {rows,t,xhi,st,bands,tFl,tSp,fps,nAvi,rowOfAvi,videoUrl,videoKind,hasVf,approxFps,dt,meta}=S;
+
+  // 指标卡
+  const det=rows.filter(r=>Number(r.detected)===1).length;
+  const ages=rows.map(r=>r.mcu_age_ms).filter(Number.isFinite).sort((a,b)=>a-b);
+  const dts=rows.map(r=>r.detect_us).filter(Number.isFinite).sort((a,b)=>a-b);
+  const median=a=>a.length?a[Math.floor(a.length/2)]:null;
+  const p99=a=>a.length?a[Math.min(a.length-1,Math.floor(a.length*.99))]:null;
+  const fpsEst=dt.length?1000/median(dt.slice().sort((a,b)=>a-b)):null;
+  const cards=[
+    ["总时长",`${xhi.toFixed(2)} s`,`${rows.length} 帧 · ≈${nf(fpsEst,1)} fps`],
+    ["飞行时长",(tFl!==null&&tSp!==null)?`${(tSp-tFl).toFixed(2)} s`:"—",
+      (tFl!==null&&tSp!==null)?`起飞 ${nf(tFl,2)}s · 落地 ${nf(tSp,2)}s`:"未检出 FLIGHT 边沿"],
+    ["检测命中",`${det} 帧`,`命中率 ${(100*det/rows.length).toFixed(1)}%`],
+    ["检测耗时",`${nf(median(dts)/1000,1)} ms`,`p99 ${nf(p99(dts)/1000,1)} ms · max ${nf(dts.length?dts[dts.length-1]/1000:null,1)} ms`],
+    ["电控年龄",`${nf(median(ages),0)} ms`,`p99 ${nf(p99(ages),0)} ms · max ${nf(ages.length?ages[ages.length-1]:null,0)} ms`],
+    ["视频",hasVf?`${nAvi} 帧`:(videoKind==="mp4"?"有视频":"无"),
+      hasVf?`CSV ${rows.length} 帧，差 ${rows.length-nAvi}`:
+      (videoKind==="avi"?"AVI 浏览器不能播":"—")]
+  ];
+  $("metrics").innerHTML=cards.map(([a,b,c])=>
+    `<div class="metric"><div class="m-label">${esc(a)}</div><div class="m-value">${esc(b)}</div><div class="m-sub">${esc(c)}</div></div>`).join("");
+
+  // 视频 / 无视频
+  const v=$("v"), nv=$("novideo");
+  if(videoUrl){
+    if(v.src&&v.src.startsWith("blob:"))URL.revokeObjectURL(v.src);
+    v.src=videoUrl; v.style.display="block"; nv.style.display="none";
+  }else{
+    v.style.display="none"; nv.style.display="flex";
+    nv.textContent=videoKind==="avi"
+      ? "导入的是 video.avi（MJPEG）——浏览器无法直接播放。数据图表仍可正常使用；想看视频请把转换后的 video.mp4 一起拖进来。"
+      : "没有导入视频。数据图表、逐帧读数、时间轴仍可正常使用；把 video.mp4 拖进来即可开启视频同步。";
+  }
+
+  // 对齐提示
+  let hint="";
+  if(hasVf&&videoKind==="mp4")hint="对齐方式：<b>视频帧号 → frame_id → 数据行</b>（不按播放时间）。画面上角烧入的 F 号就是 frame_id，可与右侧对照。";
+  else if(hasVf&&!videoKind)hint="只导入了数据：下方滑块逐帧浏览，图表与读数按 <code>frame_id</code> 精确对应。";
+  else if(approxFps)hint="⚠ 有视频但没有 <code>video_frames.csv</code>，只能按播放时间粗对齐（编码丢帧时会有偏差）。建议把 video_frames.csv 一起导入。";
+  else hint="";
+  $("alignHint").innerHTML=hint;
+
+  // 面板
+  buildPanels();
+
+  // 滑块
+  const sl=$("slider");
+  sl.max=String(Math.max(0,(hasVf?nAvi:rows.length)-1));
+  sl.value="0";
+
+  // meta
+  const mt=$("metaTable");
+  const keys=["session","mode","preroll_ms","postroll_ms","max_seconds","build","close_reason",
+              "rows_frames","rows_mcu","video_frames","dropped","cfg uart_dev","trigger_mono_us","land_mono_us"];
+  const trs=keys.filter(k=>meta[k]!==undefined).map(k=>`<tr><th>${esc(k)}</th><td>${esc(meta[k])}</td></tr>`);
+  if(tFl!==null)trs.push(`<tr><th>起飞（相对）</th><td>${tFl.toFixed(2)} s</td></tr>`);
+  if(tSp!==null)trs.push(`<tr><th>落地（相对）</th><td>${tSp.toFixed(2)} s</td></tr>`);
+  mt.innerHTML=trs.join("");
+  $("metaCard").style.display=trs.length?"block":"none";
+
+  wireControls();
+  show(0);
+}
+
+// ---------------------------------------------------------------- 图表
+let PANELS=[];
+function buildPanels(){
+  const {rows,t,xhi,bands,dt}=S;
+  const series=[]; // {title,unit,h,showX,floor,lines:[{name,color,xs,ys,w,op}]}
+  const col=(name,scale)=>rows.map(r=>{
+    const v=r[name]; return (v===null||v===undefined||!Number.isFinite(v))?null:v*(scale||1);
+  });
+  series.push({title:"姿态角 滚转 / 俯仰 / 偏航",unit:"deg",h:150,lines:[
+    {name:"滚转 roll",color:C.roll,xs:t,ys:col("mcu_roll"),w:1.5},
+    {name:"俯仰 pitch",color:C.pitch,xs:t,ys:col("mcu_pitch"),w:1.5},
+    {name:"偏航 yaw",color:C.yaw,xs:t,ys:col("mcu_yaw"),w:1.2,op:.85}]});
+  series.push({title:"角速度 gx / gy / gz",unit:"deg/s",h:150,lines:[
+    {name:"gx",color:C.gx,xs:t,ys:col("mcu_gx"),w:1.1,op:.95},
+    {name:"gy",color:C.gy,xs:t,ys:col("mcu_gy"),w:1.1,op:.95},
+    {name:"gz",color:C.gz,xs:t,ys:col("mcu_gz"),w:1.1,op:.95}]});
+  series.push({title:"电控数据年龄",unit:"ms",h:110,floor:0,lines:[
+    {name:"age",color:C.age,xs:t,ys:col("mcu_age_ms"),w:1.2}]});
+  series.push({title:"检测耗时",unit:"ms",h:110,floor:0,lines:[
+    {name:"detect",color:C.det,xs:t,ys:col("detect_us",1/1000),w:1.0}]});
+  series.push({title:"帧间隔（尖峰=丢帧）",unit:"ms",h:104,showX:true,floor:0,lines:[
+    {name:"dt",color:C.fdt,xs:t.slice(1),ys:dt,w:.9}]});
+
+  PANELS=[];
+  const host=$("panels"); host.innerHTML="";
+  series.forEach((sp,idx)=>{
+    // Y 范围只按 ys（数据）算，绝不按 xs（时间）算 —— 早期版本栽过这个跟头
+    let vals=[];
+    for(const L of sp.lines)for(const y of L.ys)if(y!==null&&Number.isFinite(y))vals.push(y);
+    if(!vals.length)vals=[0,1];
+    let lo=Math.min(...vals),hi=Math.max(...vals);
+    if(sp.floor!==undefined)lo=Math.min(lo,sp.floor);
+    if(hi-lo<1e-6){lo-=.5;hi+=.5;}
+    const pad=(hi-lo)*.08;
+    const P={idx, ...sp, ylo:lo-pad, yhi:hi+pad, xhi};
+    PANELS.push(P);
+    const div=document.createElement("div");
+    div.innerHTML=`<div class="legend">${sp.lines.map(L=>
+      `<span class="lg"><i style="background:${L.color}"></i>${esc(L.name)}</span>`).join("")}</div>` + panelSVG(P,bands);
+    host.appendChild(div);
+  });
+}
+
+function panelSVG(P,bands){
+  const px=x=>ML+(x/P.xhi)*(W-ML-MR);
+  const py=y=>MT+(P.yhi-y)/(P.yhi-P.ylo)*(P.h-MT-MB);
+  const yt=niceTicks(P.ylo,P.yhi,3);
+  const o=[];
+  o.push(`<svg class="panel" id="p${P.idx}" viewBox="0 0 ${W} ${P.h}" preserveAspectRatio="none" style="overflow:hidden">`);
+  o.push(`<defs><clipPath id="clip${P.idx}"><rect x="${ML}" y="${MT}" width="${W-ML-MR}" height="${P.h-MT-MB}"/></clipPath></defs>`);
+  o.push(`<g clip-path="url(#clip${P.idx})">`);
+  for(const [a,b,c] of bands){
+    const x1=px(Math.max(a,0)),x2=px(Math.min(b,P.xhi));
+    if(x2>x1+.3)o.push(`<rect x="${x1.toFixed(1)}" y="${MT}" width="${(x2-x1).toFixed(1)}" height="${P.h-MT-MB}" fill="${c}"/>`);
+  }
+  for(const v of yt){
+    const y=py(v);
+    if(y>=MT-1&&y<=P.h-MB+1){
+      o.push(`<line x1="${ML}" y1="${y.toFixed(1)}" x2="${W-MR}" y2="${y.toFixed(1)}" stroke="${C.grid}"/>`);
+      o.push(`<text x="${ML-8}" y="${(y+3.6).toFixed(1)}" text-anchor="end" class="yt">${nf(v,Math.abs(v)>=100?0:1)}</text>`);
+    }
+  }
+  if(P.ylo<0&&P.yhi>0){const y0=py(0);
+    o.push(`<line x1="${ML}" y1="${y0.toFixed(1)}" x2="${W-MR}" y2="${y0.toFixed(1)}" stroke="${C.axis}"/>`);}
+  for(const L of P.lines){
+    let seg=[],segs=[];
+    for(let i=0;i<L.xs.length;i++){
+      const y=L.ys[i];
+      if(y===null||!Number.isFinite(y)){if(seg.length>1)segs.push(seg);seg=[];}
+      else seg.push(`${px(L.xs[i]).toFixed(1)},${py(y).toFixed(1)}`);
+    }
+    if(seg.length>1)segs.push(seg);
+    for(const g of segs)o.push(`<polyline points="${g.join(" ")}" fill="none" stroke="${L.color}" stroke-width="${L.w}" stroke-linejoin="round" stroke-linecap="round" opacity="${L.op||1}"/>`);
+  }
+  o.push("</g>");
+  o.push(`<line x1="${ML}" y1="${P.h-MB}" x2="${W-MR}" y2="${P.h-MB}" stroke="${C.axis}"/>`);
+  if(P.showX)for(const v of niceTicks(0,P.xhi,10)){
+    const x=px(v);
+    o.push(`<line x1="${x.toFixed(1)}" y1="${P.h-MB}" x2="${x.toFixed(1)}" y2="${P.h-MB+4}" stroke="${C.axis}"/>`);
+    o.push(`<text x="${x.toFixed(1)}" y="${P.h-MB+16}" text-anchor="middle" class="xt">${nf(v,0)}</text>`);
+  }
+  o.push(`<text x="${ML}" y="${MT+10}" class="pt">${esc(P.title)}</text>`);
+  if(P.unit)o.push(`<text x="${W-MR}" y="${MT+10}" text-anchor="end" class="pu">${esc(P.unit)}</text>`);
+  o.push(`<line class="head" x1="0" y1="${MT}" x2="0" y2="${P.h-MB}" stroke="#ef4444" stroke-width="1.4" opacity="0"/>`);
+  o.push(`<rect x="${ML}" y="${MT}" width="${W-ML-MR}" height="${P.h-MT-MB}" fill="transparent" class="clicker" style="cursor:pointer"/>`);
+  o.push("</svg>");
+  return o.join("\n");
+}
+
+// ---------------------------------------------------------------- 交互
+function currentIndex(){
+  const {hasVf,nAvi,rows,fps,videoKind}=S;
+  if(hasVf&&videoKind==="mp4"&&fps){
+    const v=$("v");
+    let i=Math.floor(v.currentTime*fps+1e-6);
+    return Math.max(0,Math.min(nAvi-1,i));
+  }
+  return Math.max(0,Math.min((hasVf?nAvi:rows.length)-1,Number($("slider").value)));
+}
+function rowOf(i){
+  const {hasVf,rowOfAvi,rows}=S;
+  if(hasVf){const r=rowOfAvi[i];return (r===null||r===undefined)?null:r;}
+  return i<rows.length?i:null;
+}
+function show(i){
+  const {rows,t,fps,nAvi,st,videoKind,hasVf}=S;
+  const r=rowOf(i);
+  $("k_avi").textContent=hasVf?`${i} / ${nAvi-1}`:(videoKind==="mp4"?"无侧车":"—（纯数据模式）");
+  const v=$("v");
+  $("pos").textContent=(hasVf&&videoKind==="mp4"&&fps)
+    ? `${v.currentTime.toFixed(3)} s / ${(nAvi/fps).toFixed(2)} s`
+    : `第 ${i} 帧`;
+  if(r===null){
+    $("k_fid").textContent="—（该帧无对应数据）";
+    ["k_t","k_rpy","k_g","k_age","k_det","k_hit","k_vt","k_drift"].forEach(k=>$(k).textContent="—");
+    $("badge").textContent="无数据";$("badge").style.background="#94a3b8";
+    moveHead(null);return;
+  }
+  const d=rows[r],tReal=t[r];
+  $("k_fid").textContent=d.frame_id;
+  $("k_t").textContent=tReal.toFixed(3)+" s";
+  if(hasVf&&videoKind==="mp4"&&fps){
+    const vt=i/fps;
+    $("k_vt").textContent=vt.toFixed(3)+" s";
+    const first=rowOf(0);
+    const drift=(vt-(tReal-(first!==null?t[first]:0)))*1000;
+    $("k_drift").textContent=(drift>=0?"+":"")+drift.toFixed(0)+" ms（编码丢帧造成的播放时间差，不影响逐帧对齐）";
+  }else{$("k_vt").textContent="—";$("k_drift").textContent="无视频时不适用";}
+  $("k_rpy").textContent=`${nf(d.mcu_roll)}° / ${nf(d.mcu_pitch)}° / ${nf(d.mcu_yaw)}°`;
+  $("k_g").textContent=`${nf(d.mcu_gx)} / ${nf(d.mcu_gy)} / ${nf(d.mcu_gz)} °/s`;
+  $("k_age").textContent=d.mcu_age_ms===null?"—":d.mcu_age_ms+" ms";
+  $("k_det").textContent=d.detect_us===null?"—":nf(d.detect_us/1000,2)+" ms";
+  const hit=Number(d.detected)===1;
+  $("k_hit").innerHTML=hit?`<span class="hit">● 命中</span>　偏航 ${nf(d.yaw_deg)}° 俯仰 ${nf(d.pitch_deg)}°`:"无";
+  const s=STATE[String(st[r])]||"?";
+  $("badge").textContent=s;$("badge").style.background=STATE_COLOR[String(st[r])]||"#94a3b8";
+  moveHead(tReal);
+}
+function moveHead(tv){
+  document.querySelectorAll("svg.panel").forEach(svg=>{
+    const h=svg.querySelector(".head");
+    if(!h)return;
+    if(tv===null){h.setAttribute("opacity",0);return;}
+    const x=ML+(tv/S.xhi)*(W-ML-MR);
+    h.setAttribute("x1",x);h.setAttribute("x2",x);h.setAttribute("opacity",.9);
+  });
+}
+
+function wireControls(){
+  const {hasVf,nAvi,rows,fps,videoKind}=S;
+  const v=$("v"),sl=$("slider");
+  let raf=0;
+  const tick=()=>{if(!v.paused){const i=currentIndex();sl.value=String(i);show(i);raf=requestAnimationFrame(tick);}};
+  v.onplay=()=>{$("play").textContent="暂停";tick();};
+  v.onpause=()=>{$("play").textContent="播放";cancelAnimationFrame(raf);show(currentIndex());};
+  v.onseeked=()=>show(currentIndex());
+  v.onloadedmetadata=()=>show(currentIndex());
+  $("play").onclick=()=>{
+    if(videoKind==="mp4"&&v.src){v.paused?v.play():v.pause();return;}
+    // 纯数据模式：用定时器模拟播放
+    if(window._timer){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";return;}
+    $("play").textContent="暂停";
+    const max=(hasVf?nAvi:rows.length)-1;
+    window._timer=setInterval(()=>{
+      let i=Number(sl.value)+1;
+      if(i>=max){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";i=max;}
+      sl.value=String(i);show(i);
+    },1000/(fps||60));
+  };
+  const step=d=>{
+    const max=(hasVf?nAvi:rows.length)-1;
+    let i=Math.max(0,Math.min(max,currentIndex()+d));
+    if(hasVf&&videoKind==="mp4"&&fps&&v.src){v.pause();v.currentTime=(i+.5)/fps;}
+    else{sl.value=String(i);show(i);}
+  };
+  $("prev").onclick=()=>step(-1);
+  $("next").onclick=()=>step(1);
+  sl.oninput=()=>{
+    const i=Number(sl.value);
+    if(hasVf&&videoKind==="mp4"&&fps&&v.src){v.pause();v.currentTime=(i+.5)/fps;}
+    else show(i);
+  };
+  document.onkeydown=e=>{
+    if(e.key==="ArrowLeft"){e.preventDefault();step(-1);}
+    if(e.key==="ArrowRight"){e.preventDefault();step(1);}
+    if(e.key===" "){e.preventDefault();$("play").click();}
+  };
+  document.querySelectorAll("#spd button").forEach(b=>b.onclick=()=>{
+    document.querySelectorAll("#spd button").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on");
+    if(v.src)v.playbackRate=Number(b.dataset.r);
+  });
+  // 点图跳转
+  document.querySelectorAll("svg.panel").forEach(svg=>{
+    const c=svg.querySelector(".clicker"); if(!c)return;
+    c.onclick=ev=>{
+      const rect=svg.getBoundingClientRect();
+      const x=(ev.clientX-rect.left)/rect.width*W;
+      const tv=Math.max(0,Math.min(1,(x-ML)/(W-ML-MR)))*S.xhi;
+      // 找最近的数据行，再反查它对应的视频/滑块帧
+      let lo=0,hi=S.t.length-1;
+      while(hi-lo>1){const m=(lo+hi)>>1;if(S.t[m]<tv)lo=m;else hi=m;}
+      const row=(Math.abs(S.t[lo]-tv)<Math.abs(S.t[hi]-tv))?lo:hi;
+      let i=row;
+      if(S.hasVf){const k=S.rowOfAvi.indexOf(row);if(k>=0)i=k;}
+      if(S.hasVf&&S.videoKind==="mp4"&&S.fps&&v.src){v.pause();v.currentTime=(i+.5)/S.fps;}
+      else{sl.value=String(i);show(i);}
+    };
+  });
+  $("btnLoad").onclick=()=>{
+    const i=Number($("selSession").value||0);
+    if(SESSIONS[i])loadSession(SESSIONS[i]);
+  };
+}
+
+// ---------------------------------------------------------------- 绑定
+$("btnDir").onclick=()=>$("inDir").click();
+$("btnFiles").onclick=()=>$("inFiles").click();
+$("inDir").onchange=e=>ingest(collectFromFileList(e.target.files));
+$("inFiles").onchange=e=>ingest(collectFromFileList(e.target.files));
+const drop=$("drop");
+["dragenter","dragover"].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.add("hot");}));
+["dragleave","drop"].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.remove("hot");}));
+drop.addEventListener("drop",async e=>{
+  const all=await collectFromDataTransfer(e.dataTransfer);
+  ingest(all);
+});
+drop.addEventListener("click",e=>{if(e.target.tagName!=="BUTTON")$("btnDir").click();});
+
+// 若通过本地 http server 打开、且同目录就有 frames.csv，则自动加载（file:// 下 fetch 会被拦，属正常）
+(async function auto(){
+  try{
+    const r=await fetch("./frames.csv",{cache:"no-store"});
+    if(!r.ok)return;
+    const txt=await r.text();
+    const names=["frames.csv","video_frames.csv","meta.txt","video.mp4","video.avi","mcu.csv","health.csv"];
+    const all=[];
+    for(const n of names){
+      try{
+        const q=await fetch("./"+n,{cache:"no-store"});
+        if(q.ok)all.push({file:new File([n==="frames.csv"?txt:await q.text()],n),path:n});
+      }catch(_){}
+    }
+    if(all.length){
+      $("status").textContent="检测到同目录的飞行数据，已自动加载。";
+      ingest(all);
+    }
+  }catch(_){/* file:// 下必然失败，等用户导入 */}
+})();
+</script>
+</body></html>
