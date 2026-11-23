@@ -92,8 +92,8 @@ code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}
     <div class="big">把飞行会话文件夹拖到这里</div>
     <div class="sm">
       例如 <code>sess_454s_395_001</code>，或整个 <code>record</code> 目录（会自动列出所有会话）<br>
-      自动识别 <code>frames.csv</code> · <code>video_frames.csv</code> · <code>meta.txt</code> · <code>video.mp4</code> · <code>mcu.csv</code> · <code>health.csv</code><br>
-      ⚠ 浏览器不能播放 AVI/MJPEG；想看视频请一并导入转好的 <code>video.mp4</code>，没有视频也能看全部数据图表
+      自动识别 <code>frames.csv</code> · <code>video_frames.csv</code> · <code>meta.txt</code> · <code>video.avi</code> · <code>video.mp4</code> · <code>mcu.csv</code> · <code>health.csv</code><br>
+      <b>板端原始的 <code>video.avi</code> 可以直接看</b>：内部是逐帧 JPEG，网页自己解，不用转码、不用 ffmpeg，而且逐帧对齐比 mp4 更精确
     </div>
     <div class="row">
       <button class="primary" id="btnDir">选择文件夹</button>
@@ -118,6 +118,7 @@ code{background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:12px}
   <div class="grid">
     <div class="card">
       <video id="v" controls preload="auto" playsinline style="display:none"></video>
+      <canvas id="cv" style="display:none;width:100%;border-radius:10px;background:#0b0f14"></canvas>
       <div class="novideo" id="novideo" style="display:none"></div>
       <div class="bar">
         <button id="prev">◀ 上一帧</button>
@@ -250,9 +251,13 @@ async function ingest(all){
   ALL_FILES=all;
   SESSIONS=groupSessions(all);
   const found=[];
-  for(const n of ["frames.csv","video_frames.csv","meta.txt","video.mp4","video.avi","mcu.csv","health.csv"]){
+  const hasAny=all.some(x=>basename(x.path)==="video.avi"||basename(x.path)==="video.mp4");
+  for(const n of ["frames.csv","video_frames.csv","meta.txt","video.avi","video.mp4","mcu.csv","health.csv"]){
     const has=all.some(x=>basename(x.path)===n);
-    found.push([n + (has?" ✓":" 缺失"), has?"ok":(n==="frames.csv"?"bad":"warn")]);
+    let cls=has?"ok":(n==="frames.csv"?"bad":"warn");
+    // 视频两者有其一即可，别把没 mp4 标成警告吓人
+    if((n==="video.avi"||n==="video.mp4")&&hasAny)cls=has?"ok":"warn";
+    found.push([n + (has?" ✓":" 缺失"), cls]);
   }
   chips(found);
   if(!SESSIONS.length){
@@ -300,6 +305,49 @@ function parseMeta(text){
   return o;
 }
 const readText = f => f.text();
+
+// ---------------------------------------------------------------- AVI 解析
+// 板端保存的是 MJPEG-in-AVI：movi 里每个 00dc/00db chunk 的 payload
+// 就是一张完整独立 JPEG（实测 1055/1055 帧都是 FFD8..FFD9）。
+// 浏览器原生能解 JPEG，所以根本不需要 ffmpeg：把 chunk 切出来逐帧画到 canvas 即可。
+// 而且 AVI 第 i 个 chunk 天然等于 video_frames.csv 的 avi_index=i，
+// 比 mp4 用 floor(currentTime*fps) 猜帧号更精确。
+async function parseAVI(file){
+  const buf=new Uint8Array(await file.arrayBuffer());
+  const dv=new DataView(buf.buffer);
+  const u32=o=>dv.getUint32(o,true);
+  const fourcc=o=>String.fromCharCode(buf[o],buf[o+1],buf[o+2],buf[o+3]);
+  if(fourcc(0)!=="RIFF"||fourcc(8)!=="AVI "){throw new Error("不是 RIFF/AVI 文件");}
+  // 找 movi 四CC（LIST ... 'movi'）
+  let movi=-1;
+  for(let o=12;o+4<=buf.length&&o<4096;o++){
+    if(fourcc(o)==="movi"){movi=o+4;break;}
+  }
+  if(movi<0)throw new Error("找不到 movi 块");
+  const frames=[];   // {offset,len}
+  let p=movi;
+  while(p+8<=buf.length){
+    const fc=fourcc(p);
+    if(fc==="idx1"||fc==="LIST"||fc==="RIFF")break;
+    const sz=u32(p+4);
+    if(sz===0||p+8+sz>buf.length)break;
+    if(fc==="00dc"||fc==="00db"){
+      // 只收完整 JPEG，过滤可能的空/坏块
+      if(sz>=4&&buf[p+8]===0xFF&&buf[p+9]===0xD8)frames.push({offset:p+8,len:sz});
+    }
+    p+=8+sz+(sz&1);   // chunk 按偶数字节对齐
+  }
+  if(!frames.length)throw new Error("movi 里没有 JPEG 帧");
+  return {buf,frames};
+}
+
+// 用 createImageBitmap 解码某一帧（比 <img> 更快，且不污染 DOM）
+async function decodeAVIFrame(avi,i){
+  if(i<0||i>=avi.frames.length)return null;
+  const f=avi.frames[i];
+  const blob=new Blob([avi.buf.subarray(f.offset,f.offset+f.len)],{type:"image/jpeg"});
+  return await createImageBitmap(blob);
+}
 
 function niceTicks(lo,hi,target){
   if(!Number.isFinite(lo)||!Number.isFinite(hi)||hi<=lo)return [lo];
@@ -359,10 +407,22 @@ async function loadSession(sess){
     });
   }
 
-  // 视频文件（优先 mp4）
-  let videoUrl=null,videoKind="";
-  if(F["video.mp4"]){videoUrl=URL.createObjectURL(F["video.mp4"]);videoKind="mp4";}
-  else if(F["video.avi"]){videoKind="avi";}
+  // 视频来源优先级：AVI（逐帧精确） > MP4（按播放时间估帧号）
+  // AVI 不用转码：内部就是一帧一张 JPEG，浏览器直接解。
+  let videoUrl=null,videoKind="",avi=null,aviPending=false;
+  if(F["video.avi"]){
+    aviPending=true;
+    try{
+      avi=await parseAVI(F["video.avi"]);
+      videoKind="avi";
+      // 没有 video_frames.csv 时，也能用 AVI 自己的帧数兜底
+      if(!hasVf){nAvi=avi.frames.length;rowOfAvi=Array(nAvi).fill(null);}
+      else nAvi=Math.min(nAvi,avi.frames.length);
+    }catch(err){
+      $("status").textContent="AVI 解析失败: "+err.message;
+    }
+  }
+  if(!avi&&F["video.mp4"]){videoUrl=URL.createObjectURL(F["video.mp4"]);videoKind="mp4";}
 
   // 若导入的是 mp4 但没侧车，用容器时长估 fps（精度差，会提示）
   let approxFps=false;
@@ -372,14 +432,15 @@ async function loadSession(sess){
   for(let i=1;i<rows.length;i++)dt.push((rows[i].capture_us-rows[i-1].capture_us)/1e3);
 
   S={sess,cols,rows,t,xhi,fid0,st,bands,tFl,tSp,fps,nAvi,rowOfAvi,
-     videoUrl,videoKind,hasVf,approxFps,dt,meta,vfRows};
+     videoUrl,videoKind,hasVf,approxFps,dt,meta,vfRows,avi};
 
   $("viewer").style.display="block";
   $("importCard").style.display="block";
   render();
   $("status").textContent=`已加载 ${sess.name}：${rows.length} 帧数据`+
     (hasVf?`，${nAvi} 个视频帧`:"")+
-    (videoKind==="mp4"?"，视频已就绪":videoKind==="avi"?"，仅 AVI（浏览器不能播，已切换为纯数据模式）":"，无视频");
+    (avi?`，AVI 逐帧解码已就绪（${avi.frames.length} 帧）`:
+     videoKind==="mp4"?"，视频已就绪":"，无视频");
   // 滚动到结果
   $("viewer").scrollIntoView({behavior:"smooth",block:"start"});
 }
@@ -402,28 +463,32 @@ function render(){
     ["检测命中",`${det} 帧`,`命中率 ${(100*det/rows.length).toFixed(1)}%`],
     ["检测耗时",`${nf(median(dts)/1000,1)} ms`,`p99 ${nf(p99(dts)/1000,1)} ms · max ${nf(dts.length?dts[dts.length-1]/1000:null,1)} ms`],
     ["电控年龄",`${nf(median(ages),0)} ms`,`p99 ${nf(p99(ages),0)} ms · max ${nf(ages.length?ages[ages.length-1]:null,0)} ms`],
-    ["视频",hasVf?`${nAvi} 帧`:(videoKind==="mp4"?"有视频":"无"),
-      hasVf?`CSV ${rows.length} 帧，差 ${rows.length-nAvi}`:
-      (videoKind==="avi"?"AVI 浏览器不能播":"—")]
+    ["视频",S.avi?`${S.avi.frames.length} 帧`:hasVf?`${nAvi} 帧`:(videoKind==="mp4"?"有视频":"无"),
+      S.avi?"AVI 原生逐帧（最精确）":
+      hasVf?`CSV ${rows.length} 帧，差 ${rows.length-nAvi}`:"—"]
   ];
   $("metrics").innerHTML=cards.map(([a,b,c])=>
     `<div class="metric"><div class="m-label">${esc(a)}</div><div class="m-value">${esc(b)}</div><div class="m-sub">${esc(c)}</div></div>`).join("");
 
   // 视频 / 无视频
-  const v=$("v"), nv=$("novideo");
-  if(videoUrl){
+  // avi：canvas 逐帧画 JPEG（浏览器原生解码，不需要 ffmpeg）
+  // mp4：<video> 原生播放
+  const v=$("v"), cv=$("cv"), nv=$("novideo");
+  if(S.avi){
+    v.style.display="none"; nv.style.display="none"; cv.style.display="block";
+  }else if(videoUrl){
+    cv.style.display="none";
     if(v.src&&v.src.startsWith("blob:"))URL.revokeObjectURL(v.src);
     v.src=videoUrl; v.style.display="block"; nv.style.display="none";
   }else{
-    v.style.display="none"; nv.style.display="flex";
-    nv.textContent=videoKind==="avi"
-      ? "导入的是 video.avi（MJPEG）——浏览器无法直接播放。数据图表仍可正常使用；想看视频请把转换后的 video.mp4 一起拖进来。"
-      : "没有导入视频。数据图表、逐帧读数、时间轴仍可正常使用；把 video.mp4 拖进来即可开启视频同步。";
+    v.style.display="none"; cv.style.display="none"; nv.style.display="flex";
+    nv.textContent="没有导入视频。数据图表、逐帧读数、时间轴仍可正常使用；把 video.avi 或 video.mp4 拖进来即可开启视频同步（AVI 现在能直接看）。";
   }
 
   // 对齐提示
   let hint="";
-  if(hasVf&&videoKind==="mp4")hint="对齐方式：<b>视频帧号 → frame_id → 数据行</b>（不按播放时间）。画面上角烧入的 F 号就是 frame_id，可与右侧对照。";
+  if(S.avi)hint="<b>AVI 原生逐帧播放</b>：直接解出内部 JPEG 画到 canvas，无需转码。第 i 个 chunk 就是 <code>avi_index=i</code> → <code>frame_id</code> → 数据行，逐帧精确对齐。";
+  else if(hasVf&&videoKind==="mp4")hint="对齐方式：<b>视频帧号 → frame_id → 数据行</b>（不按播放时间）。画面上角烧入的 F 号就是 frame_id，可与右侧对照。";
   else if(hasVf&&!videoKind)hint="只导入了数据：下方滑块逐帧浏览，图表与读数按 <code>frame_id</code> 精确对应。";
   else if(approxFps)hint="⚠ 有视频但没有 <code>video_frames.csv</code>，只能按播放时间粗对齐（编码丢帧时会有偏差）。建议把 video_frames.csv 一起导入。";
   else hint="";
@@ -548,7 +613,23 @@ function currentIndex(){
     let i=Math.floor(v.currentTime*fps+1e-6);
     return Math.max(0,Math.min(nAvi-1,i));
   }
-  return Math.max(0,Math.min((hasVf?nAvi:rows.length)-1,Number($("slider").value)));
+  // AVI 与纯数据模式都以滑块为准
+  const max=S.avi?S.avi.frames.length-1:(hasVf?nAvi:rows.length)-1;
+  return Math.max(0,Math.min(max,Number($("slider").value)));
+}
+// AVI：把第 i 帧 JPEG 画到 canvas（异步解码，避免快速步进时旧帧覆盖新帧）
+let AVI_TOKEN=0;
+async function drawAVI(i){
+  if(!S.avi)return;
+  const token=++AVI_TOKEN;
+  let bmp;
+  try{ bmp=await decodeAVIFrame(S.avi,i); }catch(_){ return; }
+  if(token!==AVI_TOKEN){if(bmp)bmp.close();return;}   // 已被更新的帧取代
+  if(!bmp)return;
+  const cv=$("cv");
+  cv.width=bmp.width; cv.height=bmp.height;
+  cv.getContext("2d").drawImage(bmp,0,0);
+  bmp.close();
 }
 function rowOf(i){
   const {hasVf,rowOfAvi,rows}=S;
@@ -558,11 +639,15 @@ function rowOf(i){
 function show(i){
   const {rows,t,fps,nAvi,st,videoKind,hasVf}=S;
   const r=rowOf(i);
-  $("k_avi").textContent=hasVf?`${i} / ${nAvi-1}`:(videoKind==="mp4"?"无侧车":"—（纯数据模式）");
+  if(S.avi)drawAVI(i);                 // AVI：解出这一帧画面
+  $("k_avi").textContent=S.avi?`${i} / ${S.avi.frames.length-1}（AVI chunk）`:
+    hasVf?`${i} / ${nAvi-1}`:(videoKind==="mp4"?"无侧车":"—（纯数据模式）");
   const v=$("v");
-  $("pos").textContent=(hasVf&&videoKind==="mp4"&&fps)
-    ? `${v.currentTime.toFixed(3)} s / ${(nAvi/fps).toFixed(2)} s`
-    : `第 ${i} 帧`;
+  $("pos").textContent=S.avi
+    ? `AVI 第 ${i} 帧 · 逐帧解码`
+    : (hasVf&&videoKind==="mp4"&&fps)
+      ? `${v.currentTime.toFixed(3)} s / ${(nAvi/fps).toFixed(2)} s`
+      : `第 ${i} 帧`;
   if(r===null){
     $("k_fid").textContent="—（该帧无对应数据）";
     ["k_t","k_rpy","k_g","k_age","k_det","k_hit","k_vt","k_drift"].forEach(k=>$(k).textContent="—");
@@ -572,7 +657,9 @@ function show(i){
   const d=rows[r],tReal=t[r];
   $("k_fid").textContent=d.frame_id;
   $("k_t").textContent=tReal.toFixed(3)+" s";
-  if(hasVf&&videoKind==="mp4"&&fps){
+  if(S.avi){$("k_vt").textContent="—（AVI 按帧号，不用播放时间）";
+    $("k_drift").textContent="AVI 逐帧对齐，无播放时间偏差";}
+  else if(hasVf&&videoKind==="mp4"&&fps){
     const vt=i/fps;
     $("k_vt").textContent=vt.toFixed(3)+" s";
     const first=rowOf(0);
@@ -602,7 +689,9 @@ function moveHead(tv){
 function wireControls(){
   const {hasVf,nAvi,rows,fps,videoKind}=S;
   const v=$("v"),sl=$("slider");
-  let raf=0;
+  const maxFrame=S.avi?S.avi.frames.length-1:(hasVf?nAvi:rows.length)-1;
+  sl.max=String(Math.max(0,maxFrame));
+  let raf=0,avip=0;
   const tick=()=>{if(!v.paused){const i=currentIndex();sl.value=String(i);show(i);raf=requestAnimationFrame(tick);}};
   v.onplay=()=>{$("play").textContent="暂停";tick();};
   v.onpause=()=>{$("play").textContent="播放";cancelAnimationFrame(raf);show(currentIndex());};
@@ -610,19 +699,18 @@ function wireControls(){
   v.onloadedmetadata=()=>show(currentIndex());
   $("play").onclick=()=>{
     if(videoKind==="mp4"&&v.src){v.paused?v.play():v.pause();return;}
-    // 纯数据模式：用定时器模拟播放
+    // AVI 与纯数据模式：定时器逐帧推进（AVI 用真实帧率）
     if(window._timer){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";return;}
     $("play").textContent="暂停";
-    const max=(hasVf?nAvi:rows.length)-1;
+    const rate=Number(document.querySelector("#spd button.on").dataset.r)||1;
     window._timer=setInterval(()=>{
       let i=Number(sl.value)+1;
-      if(i>=max){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";i=max;}
+      if(i>=maxFrame){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";i=maxFrame;}
       sl.value=String(i);show(i);
-    },1000/(fps||60));
+    },1000/((fps||60)*rate));
   };
   const step=d=>{
-    const max=(hasVf?nAvi:rows.length)-1;
-    let i=Math.max(0,Math.min(max,currentIndex()+d));
+    let i=Math.max(0,Math.min(maxFrame,currentIndex()+d));
     if(hasVf&&videoKind==="mp4"&&fps&&v.src){v.pause();v.currentTime=(i+.5)/fps;}
     else{sl.value=String(i);show(i);}
   };
@@ -642,6 +730,8 @@ function wireControls(){
     document.querySelectorAll("#spd button").forEach(x=>x.classList.remove("on"));
     b.classList.add("on");
     if(v.src)v.playbackRate=Number(b.dataset.r);
+    // AVI/数据模式正在播放时，按新速度重启定时器
+    if(window._timer){clearInterval(window._timer);window._timer=null;$("play").textContent="播放";$("play").click();}
   });
   // 点图跳转
   document.querySelectorAll("svg.panel").forEach(svg=>{
@@ -656,6 +746,7 @@ function wireControls(){
       const row=(Math.abs(S.t[lo]-tv)<Math.abs(S.t[hi]-tv))?lo:hi;
       let i=row;
       if(S.hasVf){const k=S.rowOfAvi.indexOf(row);if(k>=0)i=k;}
+      if(S.avi)i=Math.max(0,Math.min(S.avi.frames.length-1,i));
       if(S.hasVf&&S.videoKind==="mp4"&&S.fps&&v.src){v.pause();v.currentTime=(i+.5)/S.fps;}
       else{sl.value=String(i);show(i);}
     };

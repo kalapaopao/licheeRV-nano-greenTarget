@@ -17,8 +17,23 @@ licheeRV-nano-greenTarget/tools/flight_viewer.html
 | 点「选择文件夹」 | 同上 |
 | 点「选择文件（可多选）」 | 手动多选 CSV / mp4 等 |
 
-想看视频，把 `video.mp4` 一起拖进来（浏览器**不能播 AVI/MJPEG**）。
-没有视频也能用：数据图表、逐帧读数、时间轴全部正常，用滑块逐帧浏览。
+**直接把板端原始的 `video.avi` 拖进去就能看**（和 CSV 一起），不需要转码、不需要 ffmpeg。
+
+原因：板端保存的是 MJPEG-in-AVI，`movi` 块里每一帧都是**完整独立的 JPEG**
+（实测 1055/1055 帧都是 `FFD8..FFD9`）。浏览器原生就能解 JPEG，页面自己把 chunk
+切出来逐帧画到 canvas 上。而且 **AVI 第 i 个 chunk 天然就等于 `avi_index=i`**，
+比 mp4 用 `floor(currentTime*fps)` 猜帧号更精确。
+
+所以视频来源优先级是 **AVI > MP4**：
+
+| 导入了什么 | 行为 |
+|---|---|
+| 只有 `video.avi` | ✅ canvas 逐帧播放，精确对齐 |
+| `video.avi` + `video.mp4` | ✅ 优先用 AVI（更精确） |
+| 只有 `video.mp4` | ✅ `<video>` 播放，按帧号估对齐 |
+| 都没有 | 数据图表、逐帧读数、时间轴照常可用，滑块逐帧浏览 |
+
+想把 AVI 转成 mp4 分享给别人也仍可用 `tools/flight_sync_player.py`，但**网页查看不需要**。
 
 **方便做法**：把 `flight_viewer.html` 复制一份到 `record/` 旁边，或直接用
 `tools/flight_sync_player.py` 生成的 `sess_xxx/web/` 目录——如果通过本地 http 服务打开
@@ -31,30 +46,35 @@ licheeRV-nano-greenTarget/tools/flight_viewer.html
 |---|---|---|
 | `frames.csv` | ✅ | 主表：每帧一行，姿态/角速度/检测/电控快照 |
 | `video_frames.csv` | 推荐 | AVI 帧号 ↔ frame_id ↔ 时间戳，逐帧对齐的钥匙 |
-| `video.mp4` | 推荐 | 视频（H.264，浏览器能播） |
+| `video.avi` | 推荐 | **板端原始视频，网页直接逐帧解 JPEG 播放**（最精确） |
+| `video.mp4` | 可选 | 转码后的 H.264，AVI 不存在时才用 |
 | `meta.txt` | 可选 | 触发/落地时刻、关闭原因、配置快照 |
 | `mcu.csv` / `health.csv` | 可选 | 预留（目前页面不用它们画图） |
-| `video.avi` | — | 只提示「浏览器不能播」，不加载 |
 
 导入后顶部会显示每个文件的识别状态（绿=有 / 黄=缺 / 红=致命缺失）。
 
 ## 对齐方式（关键）
 
 ```
-视频帧号 avi_index = floor(currentTime × fps)
-                  → video_frames.csv[avi_index].frame_id
-                  → frames.csv 里同一 frame_id 的那一行
+AVI  : 第 i 个 00dc/00db chunk  ==  avi_index=i
+MP4  : avi_index = floor(currentTime × fps)
+                ↓
+       video_frames.csv[avi_index].frame_id
+                ↓
+       frames.csv 里同一 frame_id 的那一行
 ```
 
-**不按播放时间对齐**：录制时编码线程会丢帧，AVI 是恒定帧率封装，实测播放时刻与真实
-采集时刻能差到 1.6 秒。按时间对齐会错几十帧。页面右侧同时显示「视频时刻 / 采集时刻 /
-偏差」，偏差是编码丢帧造成的，不影响逐帧对应。
+**不按播放时间对齐**：录制时编码线程会丢帧，恒定帧率封装下实测播放时刻与真实
+采集时刻能差到 1.6 秒，按时间对齐会错几十帧。AVI 模式直接按 chunk 序号取，**完全
+没有这个误差**；mp4 模式仍会显示「视频时刻 / 采集时刻 / 偏差」解释差异。
 
 画面上角烧入的 `Fxxxxx` 就是 frame_id，可与右侧读数直接对照。
 
 ## 功能
 
 - 视频播放 / 暂停 / 逐帧步进（按钮或 ← →）/ 0.25× 0.5× 1× 变速
+  - AVI 模式：canvas 逐帧解码 JPEG，按真实帧率推进
+  - MP4 模式：`<video>` 原生播放
 - 时间轴滑块；点任意图表跳到那一帧
 - 5 个共享时间轴的面板：姿态角、角速度、电控年龄、检测耗时、帧间隔
   - 灰/蓝/黄色带 = 静止 / 飞行 / 落地后
@@ -70,7 +90,7 @@ licheeRV-nano-greenTarget/tools/flight_viewer.html
 |---|---|---|
 | 运行方式 | 浏览器直接打开 | Python 脚本跑一次 |
 | 数据 | 现场导入，任意会话 | 生成时写死到某个 `web/index.html` |
-| 视频 | 需要已转好的 `video.mp4` | 自己把 `video.avi` 转成 `video.mp4` |
+| 视频 | **AVI 直接逐帧**（最精确）或 mp4 | 自己把 `video.avi` 转成 `video.mp4` |
 | 适合 | 看多次飞行、换电脑 | 给某一场飞行出一份固定报告 |
 
 两者用的是**同一条帧号对齐链**，可互相印证。已生成的 `sess_xxx/web/index.html` 不受影响。
@@ -80,6 +100,8 @@ licheeRV-nano-greenTarget/tools/flight_viewer.html
 | 项 | 结果 |
 |---|---|
 | JS 语法（`node --check`） | ✅ 通过 |
+| **真实 AVI 逐帧解析复现** | ✅ 75.99 MB 解出 1055 个 JPEG，1055/1055 完整 `FFD8..FFD9`；比侧车多 1 个尾帧 |
+| **AVI chunk 序号 ↔ avi_index** | ✅ 天然一一对应，无播放时间误差 |
 | 用 `sess_454s_395_001` 真实数据复现解析 | ✅ 1250 行 / 33 列，起飞 3.01s、落地 18.87s |
 | 帧号映射 | ✅ 1053/1054 有效，严格递增 |
 | 各面板 Y 轴量程 | ✅ 姿态 -179..583、角速度 -893..1152 等，全部为数据量程、非时间量程 |
@@ -91,5 +113,7 @@ licheeRV-nano-greenTarget/tools/flight_viewer.html
 - `file://` 下的自动加载被浏览器安全策略禁止，必须手动选一次目录/文件；
 - 拖入整个大目录时，`webkitGetAsEntry` 遍历可能较慢；
 - 没导入 `video_frames.csv` 但有 mp4 时只能按播放时间粗对齐，页面会明确警告；
+- **只导入 AVI、没有 `video_frames.csv`** 时，视频能逐帧播但无法映射到数据行（右侧显示「无对应数据」），图表仍按 CSV 独立显示；
+- AVI 整文件一次读进内存（`ArrayBuffer`），75 MB 级别没问题，几百 MB 的会话会占较多内存；
 - CSV 解析器按逗号简单切分（本项目 CSV 不含引号字段），通用性有限；
 - 页面不读 `mcu.csv`/`health.csv` 画图，只识别它们是否存在。
