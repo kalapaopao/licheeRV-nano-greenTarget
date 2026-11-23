@@ -105,7 +105,12 @@ class Panel:
     def set_range(self, lo, hi, pad=0.08, floor=None):
         if floor is not None:
             lo = min(lo, floor)
-        p = (hi - lo) * pad or 1.0
+        # 退化保护：全零/全相等时给一个最小跨度，否则 py() 会除零把线画飞
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            lo, hi = 0.0, 1.0
+        if hi - lo < 1e-6:
+            lo, hi = lo - 0.5, hi + 0.5
+        p = (hi - lo) * pad
         self.ylo, self.yhi = lo - p, hi + p
         self.yticks = nice_ticks(self.ylo, self.yhi, 3)
 
@@ -120,8 +125,15 @@ class Panel:
                                 ys=np.asarray(ys, float), width=width, opacity=opacity))
 
     def svg(self, bands):
+        # clipPath + overflow:hidden 双保险：即使将来又算错范围，
+        # 曲线也只会待在自己面板里，不会画到整页上（截图里那种满屏竖线）。
         o = [f'<svg class="panel" id="p{self.idx}" viewBox="0 0 {W} {self.h}" '
-             f'preserveAspectRatio="none" data-idx="{self.idx}">']
+             f'preserveAspectRatio="none" data-idx="{self.idx}" '
+             f'style="overflow:hidden">',
+             f'<defs><clipPath id="clip{self.idx}">'
+             f'<rect x="{ML}" y="{MT}" width="{W - ML - MR}" '
+             f'height="{self.h - MT - MB}"/></clipPath></defs>',
+             f'<g clip-path="url(#clip{self.idx})">']
         for a, b, color in bands:
             x1, x2 = self.px(max(a, 0)), self.px(min(b, self.xhi))
             if x2 > x1 + .3:
@@ -153,6 +165,7 @@ class Panel:
                 o.append(f'<polyline points="{" ".join(g)}" fill="none" stroke="{s["color"]}" '
                          f'stroke-width="{s["width"]}" stroke-linejoin="round" '
                          f'stroke-linecap="round" opacity="{s["opacity"]}"/>')
+        o.append("</g>")   # 曲线/色带到此为止，后面是坐标轴文字，不裁剪
         o.append(f'<line x1="{ML}" y1="{self.h - MB}" x2="{W - MR}" y2="{self.h - MB}" '
                  f'stroke="{C["axis"]}"/>')
         if self.show_x:
@@ -232,8 +245,13 @@ def build(session: Path, crf: int = 18) -> Path:
     panels = []
     def mk(idx, title, unit, series, h=150, show_x=False, floor=None):
         p = Panel(idx, title, unit, h, show_x, xhi)
-        vals = np.concatenate([np.asarray(s[2], float) for s in series])
+        # series = (名称, 颜色, xs, ys, 线宽, 透明度)：Y 轴范围只能按 ys（s[3]）算。
+        # 早期版本误用了 s[2]（时间 t），把 0~20 秒当成角度量程，
+        # 于是几百度的姿态/角速度全部冲出面板，在页面上变成满屏彩色竖线。
+        vals = np.concatenate([np.asarray(s[3], float) for s in series])
         vals = vals[np.isfinite(vals)]
+        if len(vals) == 0:
+            vals = np.array([0.0, 1.0])
         p.set_range(float(vals.min()), float(vals.max()), floor=floor)
         for nm, col, xs, ys, w, op in series:
             p.add(nm, col, xs, ys, w, op)
@@ -329,10 +347,11 @@ button.primary:hover{{background:#1d4ed8}}
 .seg button{{border:0;border-radius:0;padding:6px 11px}}
 .seg button.on{{background:#e8f0fe;color:#1d4ed8;font-weight:600}}
 .pill{{font-size:12px;color:var(--muted);margin-left:auto;font-variant-numeric:tabular-nums}}
-.kv{{display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:13px;
- font-variant-numeric:tabular-nums}}
-.kv dt{{color:var(--muted)}}
-.kv dd{{margin:0;font-weight:600}}
+.kv{{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 14px;font-size:13px;
+ font-variant-numeric:tabular-nums;align-items:start}}
+.kv dt{{color:var(--muted);white-space:nowrap}}
+.kv dd{{margin:0;font-weight:600;overflow-wrap:anywhere;min-width:0}}
+#k_drift{{font-size:11px;line-height:1.45;color:var(--muted);font-weight:400}}
 .big{{font-size:15px}}
 .badge{{display:inline-block;padding:1.5px 9px;border-radius:999px;color:#fff;
  font-size:12px;font-weight:600;letter-spacing:.3px}}
@@ -433,7 +452,7 @@ function paint(i) {{
   const drift = (vt - ct) * 1000;
   $('k_vt').textContent = vt.toFixed(3) + ' s';
   $('k_drift').textContent = (drift >= 0 ? '+' : '') + drift.toFixed(0) +
-    ' ms（负=视频比真实慢，因为中间编码掉了帧，画面按恒定帧率播放）';
+    ' ms（编码丢帧造成的播放时间差，不影响逐帧对齐）';
   $('k_fid').textContent = (D.fid0 + r);
   $('k_t').textContent = T[r].toFixed(3) + ' s';
   $('k_rpy').textContent = nf(D.roll[r]) + '° / ' + nf(D.pitch[r]) + '° / ' + nf(D.yaw[r]) + '°';
