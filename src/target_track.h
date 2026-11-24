@@ -128,6 +128,10 @@ class Kalman1D {
 // ---------------------------------------------------------------------------
 class TargetTracker {
  public:
+  // VI 宽度裁剪后主点要左移 dx（dx = 左边裁掉的像素数），否则角度整体偏。
+  // 单独提供这个方法，避免为了改 cx 去重新 configure（那会把跟踪状态清零）。
+  void shift_cx(float dx) { calib_.cx -= dx; }
+  float principal_cx() const { return calib_.cx; }
   void configure(const CameraCalib& calib, const KalmanCfg& kf, const SelectCfg& sel,
                  float target_diameter_m);
 

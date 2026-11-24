@@ -52,6 +52,9 @@ BLC_GR=256
 BLC_GB=256
 BLC_B=256
 JPEG_QUALITY=85
+# 宽度裁剪（像素，0 = 不裁）。用于裁掉保护盖造成的左右黑边，减小录像体积。
+# 居中裁：左右各去 (1280-w)/2。高度不裁。会自动对齐到 16 的倍数。
+CAM_CROP_WIDTH=0
 RUN_SECONDS=120
 RECORD_ENABLE=false
 RECORDING=0
@@ -161,6 +164,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         black_level_gb) BLC_GB=$value;;
         black_level_b) BLC_B=$value;;
         jpeg_quality) JPEG_QUALITY=$value;;
+        cam_crop_width) CAM_CROP_WIDTH=$value;;
         run_seconds) RUN_SECONDS=$value;;
         record_enable) RECORD_ENABLE=$value;;
         web_ip) WEB_BIND=$value;;
@@ -321,6 +325,7 @@ validate_integer black_level_gr "$BLC_GR" 0 4095
 validate_integer black_level_gb "$BLC_GB" 0 4095
 validate_integer black_level_b "$BLC_B" 0 4095
 validate_integer jpeg_quality "$JPEG_QUALITY" 75 90
+validate_integer cam_crop_width "$CAM_CROP_WIDTH" 0 1280
 [ "$RUN_SECONDS" -eq 0 ] || validate_integer run_seconds "$RUN_SECONDS" 20 300
 
 DURATION=${1:-$RUN_SECONDS}
@@ -356,7 +361,8 @@ export RECORD80_BLC_GR="$BLC_GR"
 export RECORD80_BLC_GB="$BLC_GB"
 export RECORD80_BLC_B="$BLC_B"
 export RECORD80_JPEG_QUALITY="$JPEG_QUALITY"
-echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY duration=$DURATION recording=$RECORDING record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE http_enable=$HTTP_ENABLE"
+export CAM_CROP_WIDTH="$CAM_CROP_WIDTH"
+echo "RUN_CONFIG mode=$EXPOSURE_MODE exposure_us=$MANUAL_EXP_US gain=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN blc=$BLC_MODE jpeg=$JPEG_QUALITY crop_w=$CAM_CROP_WIDTH duration=$DURATION recording=$RECORDING record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE http_enable=$HTTP_ENABLE"
 REG=0x030028c4
 ORIG=0x00200001
 TARGET=0x00210001

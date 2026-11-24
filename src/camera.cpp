@@ -486,6 +486,8 @@ int main(int argc,char** argv){
     // ======================================================================
     bool track_on=true, uart_on=false, inv_yaw=false, inv_pitch=false;
     float cam_fx=1024.0f, cam_fy=1024.0f, cam_cx=640.0f, cam_cy=360.0f;
+    // 宽度裁剪（0 = 不裁）。用于把保护盖造成的左右黑边裁掉，减小录像体积。
+    unsigned cam_crop_w=0;
     float opt_yaw=0.0f, opt_pitch=0.0f, target_dia=0.05f;
     float aim_up=1.5f;   // 瞄准点向上偏移系数（= 装甲板中心到灯中心距离 / 灯直径），抄 HERO 的 1.5
     float sel_conf=0.5f, sel_aspect=1.5f, sel_maxdist=60.0f;
@@ -537,6 +539,7 @@ int main(int argc,char** argv){
         env_f32("CAM_FX",1024.0f,1.0f,20000.0f,cam_fx) &&
         env_f32("CAM_FY",1024.0f,1.0f,20000.0f,cam_fy) &&
         env_f32("CAM_CX",640.0f,-10000.0f,20000.0f,cam_cx) &&
+       !env_u32("CAM_CROP_WIDTH",0,0,1280,cam_crop_w) ||
         env_f32("CAM_CY",360.0f,-10000.0f,20000.0f,cam_cy) &&
         env_f32("OPTICAL_YAW_DEG",0.0f,-90.0f,90.0f,opt_yaw) &&
         env_f32("OPTICAL_PITCH_DEG",0.0f,-90.0f,90.0f,opt_pitch) &&
@@ -816,6 +819,47 @@ int main(int argc,char** argv){
     int rc=CVI_VI_GetChnAttr(0,0,&vi);
     vi.u32Depth=2;
     if(!rc)rc=CVI_VI_SetChnAttr(0,0,&vi);
+    // ---- 宽度裁剪（去掉保护盖造成的左右黑边）----------------------------
+    // 只裁宽度、高度保持满幅；居中裁，左右各去 (sensor_w - crop_w)/2。
+    // ⚠ VI 通道裁剪之后，送到 CPU 的帧就是裁剪后的：
+    //     检测 / OSD / VENC 全部看到新尺寸，所以下面要同步：
+    //       ① 相机主点 cx 左移 crop_x（否则目标角度整体偏）
+    //       ② VENC 画幅
+    //       ③ AVI 头里的画幅
+    unsigned crop_w=size.u32Width, crop_h=size.u32Height, crop_x=0;
+    if(cam_crop_w>0 && cam_crop_w<size.u32Width){
+        // ⚠ 必须是 64 的倍数：VI 输出的 stride（每行字节数）按 64 对齐。
+        // 实测 crop_w=1104 时 width=1104 但 stride=1152，VENC 把行尾填充当成像素，
+        // 画面被拉斜、JPEG 体积从 19KB 暴涨到 84KB（视频不可用）。
+        // 只要 stride == width，编码就正常。
+        crop_w=(cam_crop_w/64u)*64u;
+        if(crop_w<256u)crop_w=256u;
+        crop_x=((size.u32Width-crop_w)/2u)/2u*2u;    // 起点 2 对齐
+        VI_CROP_INFO_S crop{};
+        crop.bEnable=CVI_TRUE;
+        crop.enCropCoordinate=VI_CROP_ABS_COOR;
+        crop.stCropRect.s32X=(CVI_S32)crop_x;
+        crop.stCropRect.s32Y=0;
+        crop.stCropRect.u32Width=crop_w;
+        crop.stCropRect.u32Height=crop_h;
+        int crop_rc=CVI_VI_SetChnCrop(0,0,&crop);
+        DIAGF(gt::kDiagBoot,"VI_CROP enable=1 x=%u y=0 %ux%u (64 对齐) rc=0x%x\n",
+              crop_x,crop_w,crop_h,crop_rc);
+        if(crop_rc){
+            fprintf(stderr,"VI_CROP_FAILED rc=0x%x (回退到满幅 %ux%u)\n",
+                    crop_rc,size.u32Width,size.u32Height);
+            crop_w=size.u32Width; crop_h=size.u32Height; crop_x=0;
+        }else{
+            // 裁剪后主点左移，保证角度换算和全幅一致
+            g_target.shift_cx((float)crop_x);
+            DIAGF(gt::kDiagBoot,"CALIB_CX_SHIFT cam_cx=%.1f - crop_x=%u -> cx=%.1f\n",
+                  cam_cx,crop_x,g_target.principal_cx());
+        }
+    }else{
+        DIAGF(gt::kDiagBoot,"VI_CROP enable=0 full=%ux%u cam_crop_width=%u\n",
+              size.u32Width,size.u32Height,cam_crop_w);
+    }
+    avi.set_dimensions((int)crop_w,(int)crop_h);
     VI_PIPE_ATTR_S pipe{};
     int prc=CVI_VI_GetPipeAttr(0,&pipe);
     DIAGF(gt::kDiagBoot, "DIAG channel_rc=%x compress=%d video=%d depth=%u pipe_rc=%x pipe_compress=%d\n",rc,vi.enCompressMode,vi.enVideoFormat,vi.u32Depth,prc,pipe.enCompressMode);
@@ -824,8 +868,8 @@ int main(int argc,char** argv){
     VENC_CHN_ATTR_S attr{};
     // JPEG single-frame mode has no MJPEG frame-rate-control field.
     attr.stVencAttr.enType=PT_JPEG;
-    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=size.u32Width;
-    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=size.u32Height;
+    attr.stVencAttr.u32MaxPicWidth=attr.stVencAttr.u32PicWidth=crop_w;
+    attr.stVencAttr.u32MaxPicHeight=attr.stVencAttr.u32PicHeight=crop_h;
     attr.stVencAttr.u32BufSize=2*1024*1024;
     attr.stVencAttr.bByFrame=CVI_TRUE;
     attr.stVencAttr.stAttrJpege.bSupportDCF=CVI_FALSE;
@@ -1056,7 +1100,26 @@ int main(int argc,char** argv){
             // ---- 绿色圆灯检测（每帧，抽点 4 → 320x180 网格）----
             // 说明：VI 帧为 NV12（UV 交织）。抽点 Y 与 UV，步长 4；
             //       U/V 顺序对绿色判据无影响（两者都要求 < 128）。
-            const unsigned W=frame.stVFrame.u32Width,H=frame.stVFrame.u32Height;
+            // 一次性打印帧几何：VI 通道裁剪后，宽会变小，但 stride（每行字节数）
+        // 可能仍是原宽度。若 stride > width，说明帧里有行尾填充；
+        // 这时 VENC 必须按 stride 解释，否则画面会被拉斜、JPEG 体积暴涨。
+        {
+            static bool geom_logged=false;
+            if(!geom_logged){
+                geom_logged=true;
+                DIAGF(gt::kDiagBoot,"FRAME_GEOM width=%u height=%u stride=%u len=%u crop_w=%u stride_ok=%d\n",
+                      frame.stVFrame.u32Width,frame.stVFrame.u32Height,
+                      frame.stVFrame.u32Stride[0],frame.stVFrame.u32Length[0],crop_w,
+                      frame.stVFrame.u32Stride[0]==frame.stVFrame.u32Width?1:0);
+                if(frame.stVFrame.u32Stride[0]!=frame.stVFrame.u32Width){
+                    fprintf(stderr,"FRAME_STRIDE_MISMATCH width=%u stride=%u —— 视频会拉斜，"
+                                   "请把 cam_crop_width 改成 64 的倍数\n",
+                            frame.stVFrame.u32Width,frame.stVFrame.u32Stride[0]);
+                }
+                fflush(stdout);
+            }
+        }
+        const unsigned W=frame.stVFrame.u32Width,H=frame.stVFrame.u32Height;
             if(frame.stVFrame.pu8VirAddr[0]==nullptr){
                 unsigned sy=frame.stVFrame.u32Length[0]?frame.stVFrame.u32Length[0]:frame.stVFrame.u32Stride[0]*H;
                 unsigned su=frame.stVFrame.u32Length[1]?frame.stVFrame.u32Length[1]:frame.stVFrame.u32Stride[1]*((H+1)/2);

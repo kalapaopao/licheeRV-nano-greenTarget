@@ -23,7 +23,10 @@ class AviMjpegWriter {
     long avih_frames_pos_ = 0;
     long strh_rate_pos_ = 0;
     long strh_length_pos_ = 0;
-    uint64_t first_pts_ = 0, last_pts_ = 0;
+    // 画幅。以前写死 1280x720；VI 做宽度裁剪后必须跟着变，否则 AVI 头与实际帧
+  // 尺寸不符，播放器会花屏或直接打不开。
+  int w_ = 1280, h_ = 720;
+  uint64_t first_pts_ = 0, last_pts_ = 0;
     uint32_t max_frame_ = 0;
     bool failed_ = false;
     static bool put(FILE* f, const void* bytes, size_t n) {
@@ -73,7 +76,7 @@ class AviMjpegWriter {
         ok &= u32(file_, 0) && u32(file_, 0) && u32(file_, 0x10);
         avih_frames_pos_ = ftell(file_);
         ok &= u32(file_, 0) && u32(file_, 0) && u32(file_, 1);
-        ok &= u32(file_, 0) && u32(file_, 1280) && u32(file_, 720);
+        ok &= u32(file_, 0) && u32(file_, static_cast<uint32_t>(w_)) && u32(file_, static_cast<uint32_t>(h_));
         for (int i = 0; i < 4; ++i) ok &= u32(file_, 0);
         ok &= four(file_, "LIST");
         long strl_size = ftell(file_);
@@ -86,11 +89,12 @@ class AviMjpegWriter {
         ok &= u32(file_, 80000) && u32(file_, 0);
         strh_length_pos_ = ftell(file_);
         ok &= u32(file_, 0) && u32(file_, 0) && u32(file_, 0xffffffff) && u32(file_, 0);
-        ok &= u16(file_, 0) && u16(file_, 0) && u16(file_, 1280) && u16(file_, 720);
+        ok &= u16(file_, 0) && u16(file_, 0) &&
+             u16(file_, static_cast<uint16_t>(w_)) && u16(file_, static_cast<uint16_t>(h_));
         ok &= four(file_, "strf") && u32(file_, 40);
-        ok &= u32(file_, 40) && u32(file_, 1280) && u32(file_, 720);
+        ok &= u32(file_, 40) && u32(file_, static_cast<uint32_t>(w_)) && u32(file_, static_cast<uint32_t>(h_));
         ok &= u16(file_, 1) && u16(file_, 24) && four(file_, "MJPG");
-        ok &= u32(file_, 1280 * 720 * 3);
+        ok &= u32(file_, static_cast<uint32_t>(w_) * static_cast<uint32_t>(h_) * 3u);
         for (int i = 0; i < 4; ++i) ok &= u32(file_, 0);
         long strl_end = ftell(file_);
         ok &= patch(strl_size, static_cast<uint32_t>(strl_end - strl_size - 4));
@@ -104,7 +108,7 @@ class AviMjpegWriter {
         movi_fourcc_pos_ = ftell(file_) - 4;
         if (!ok) { perror("RECORDING_HEADER_FAILED"); failed_ = true; return false; }
         if (gt::diag(gt::kDiagAvi)) {
-            printf("RECORDING_STARTED file=%s format=MJPEG_AVI size=1280x720\n", path_.c_str());
+            printf("RECORDING_STARTED file=%s format=MJPEG_AVI size=%dx%d\n", path_.c_str(), w_, h_);
         }
         return true;
     }
@@ -114,6 +118,10 @@ public:
         if (file_) finish();
         failed_ = false;
         return start(dir, base);
+    }
+    // 设定录像画幅（必须在 open 之前调用）。VI 裁剪后帧尺寸变小，这里要同步。
+    void set_dimensions(int w, int h) {
+        if (w > 0 && h > 0) { w_ = w; h_ = h; }
     }
     bool is_open() const { return file_ != nullptr; }
     const std::string& path() const { return path_; }
