@@ -475,8 +475,15 @@ void FrameLog::open_session(MonoUs trigger_us) {
   land_us_.store(0);
 
   if (gt::diag(gt::kDiagLog)) {
-    fprintf(stdout, "LOG_SESSION_OPEN dir=%s trigger_us=%llu\n", session_dir_.c_str(),
-            static_cast<unsigned long long>(trigger_us));
+    // 把「开会话时环形缓冲里有几行、预录下界在触发前多少毫秒」打出来：
+    // 这两个数直接决定 frames.csv 开头有没有 STATIC 预录段。
+    // 实测过一种情况：相机刚起 3.5 秒就触发，却一行预录都没留下 —— 靠这两个数定位。
+    fprintf(stdout,
+            "LOG_SESSION_OPEN dir=%s trigger_us=%llu ring_rows=%d floor_back_ms=%.0f\n",
+            session_dir_.c_str(), static_cast<unsigned long long>(trigger_us),
+            count_,
+            preroll_floor_us_ == 0 ? -1.0
+                                   : (static_cast<double>(trigger_us) - static_cast<double>(preroll_floor_us_)) / 1000.0);
     fflush(stdout);
   }
 }
@@ -692,6 +699,11 @@ LogStats FrameLog::stats() const {
   s.dropped = dropped_.load();
   s.triggers = triggers_.load();
   s.open = session_open_flag_.load() ? 1 : 0;
+  // 环形缓冲行数：待机期应持续增长到预录窗口上限；一直为 0 说明预录没生效
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    s.ring_rows = count_;
+  }
   const uint64_t last = last_session_event_us_.load();
   s.last_session_ms =
       last == 0 ? -1 : static_cast<int>((monotonic_us() - last) / 1000ULL);

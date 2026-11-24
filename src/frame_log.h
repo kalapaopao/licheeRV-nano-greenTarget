@@ -55,6 +55,7 @@ struct LogStats {
   unsigned long dropped = 0;       // 会话内缓冲溢出丢的行数（>0 说明写盘跟不上）
   unsigned long triggers = 0;      // 收到的起飞边沿次数
   int open = 0;                    // 当前是否有会话在写
+  int ring_rows = 0;               // 环形缓冲当前行数（待机期应增长到预录窗口上限）
   int last_session_ms = -1;        // 距最近一次会话开/关的毫秒数
 };
 

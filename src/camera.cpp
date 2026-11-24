@@ -1302,11 +1302,16 @@ int main(int argc,char** argv){
         if(t-report>=5 && count>1){
             unsigned long enc=encoded.load(),sent=network_sent.load(),bytes=network_bytes.load();
 
+            // 记录器环形缓冲里当前攒了多少行。
+            // 触发式记录靠它做「起飞前回滚」；这个数在待机期应该持续增长到窗口上限，
+            // 如果一直是 0，说明 on_frame 根本没进缓冲，预录就是假的。
+            const gt::LogStats lst=g_log.stats();
+
             // 采集 / 编码 / 网络
             DIAGF(gt::kDiagPerf,
                   "capture_frames=%lu host_fps=%.4f pts_fps=%.4f duplicate_pts=%lu timeouts=%lu "
                   "encoded=%lu encode_errors=%lu encode_fps=%.3f sent_fps=%.3f jpeg_mbit_s=%.3f "
-                  "preview_replaced=%lu\n",
+                  "preview_replaced=%lu ring=%d log_open=%d\n",
                   count,
                   (count-1)/(last-first),
                   lastpts>firstpts?(count-1)*1e6/(lastpts-firstpts):0,
@@ -1317,7 +1322,9 @@ int main(int argc,char** argv){
                   (enc-last_encoded)/(t-report),
                   (sent-last_sent)/(t-report),
                   (bytes-last_bytes)*8e-6/(t-report),
-                  preview_replaced.load());
+                  preview_replaced.load(),
+                  lst.ring_rows,
+                  lst.open ? 1 : 0);
 
             // 检测耗时；打印完把窗口统计清零
             if(det_count){
