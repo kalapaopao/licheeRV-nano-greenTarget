@@ -134,3 +134,62 @@ t=2908s pid=3190 tag=exit rc=0 reason=stopped_by_signal frames=605 errors=0 stop
 | 孤儿保护 | 板端 `kill -9` 监督进程 | 相机 ~5 s 后自退，`tag=exit stop_signal=15` |
 | 正常停机 | 板端跑满 30 s | `supervisor_exit reason=test_completed rc=0` + 相机 `stop_signal=15` |
 | 回归 | 主机 7 套测试 | 177 项 0 失败（记录器 31 / 诊断 15 / 串口 42+37+23+16 / 触发链路 13） |
+
+## 9. 自动重启（`auto_restart`）
+
+程序因**可恢复原因**结束后自动把自己拉起来，用于不断电连续使用。
+
+```yaml
+auto_restart: true              # 总开关，默认 false
+auto_restart_max: 0             # 最多跑到第几轮，0 = 不限
+auto_restart_delay_s: 3         # 退出后等几秒再拉起
+auto_restart_cool_millic: 70000 # 温度≥此值先等降温
+auto_restart_min_run_s: 20      # 一轮短于此值算「快速失败」
+auto_restart_max_short: 3       # 连续快速失败超过此次数就放弃（防死循环）
+auto_restart_wait_session_s: 60 # 重启前最多等会话收尾多久（防切断飞行）
+```
+
+### 9.1 哪些退出会重启
+
+| 退出原因 | 重启 | 说明 |
+|---|---|---|
+| `landed_exit` | ✅ | 落地归档完（`exit_after_land: true` 时） |
+| `test_completed` | ✅ | `run_seconds` 到点（最常见） |
+| `run_ended` | ✅ | 时长参数为 0 却退出了（异常但可恢复） |
+| `temp_limit` | ✅ | 过热停机，先等降到 `auto_restart_cool_millic` 以下 |
+| `camera_crash` | ✅ | 相机异常退出（有连续失败守卫） |
+| `terminated` / `interrupted` / `hangup` | ❌ | 用户 `stop.sh` 或断开，尊重意图 |
+| `clock_changed` / `mipi_changed` | ❌ | 真硬件问题，重启只会把故障藏起来 |
+
+### 9.2 两条安全保护（缺一不可）
+
+**① 等会话收尾**：`run_seconds` 到点的那一刻可能正在飞。直接重启会把飞行切断。
+实现是看日志里 `LOG_SESSION_OPEN` / `LOG_SESSION_CLOSE` 的计数差，
+有未收尾的会话就最多等 `auto_restart_wait_session_s` 秒。
+
+实测（2026-11-24 板端）：
+```
+TEST_COMPLETED                                    ← 20s 到点，飞行中
+AUTO_RESTART_WAIT_SESSION 等会话收尾（最多 60s）
+AUTO_RESTART_SESSION_WAITED 4s                    ← 等到落地+postroll
+AUTO_RESTART round=2 reason=test_completed ran=22s ← 才重启
+→ 会话 close_reason=landed，state=1 有 1305 行，飞行完整
+```
+
+**② 优雅停相机**：程序正常结束时相机是「留着让 guard 20 秒后杀」的。
+`auto_restart` 若直接 exec，旧相机会和新相机抢 VI/ISP，新的一定起不来。
+所以重启前先 `SIGTERM` 相机、等它把 AVI 索引和 meta 收尾（最多 20s），等不到才 `SIGKILL`。
+
+**③ 连续快速失败守卫**：崩溃后无脑重启会形成死循环、把故障藏起来。
+连续 `auto_restart_max_short` 轮运行不足 `auto_restart_min_run_s` 就放弃，打印：
+
+```
+AUTO_RESTART_GIVEUP 连续 4 次运行不足 20s，停止重启
+```
+
+### 9.3 一个踩过的坑
+
+`exec "$0"` 在 `$0` 是裸文件名（`sh start.sh` 时的 `start.sh`）时会去 PATH 找，
+直接 `rc=127` 失败；而且板上的 `start.sh` 是 `0600`（无 `+x`），直接 exec 也不行。
+所以现在用 `SELF`（绝对路径）+ `exec sh "$SELF"`。
+

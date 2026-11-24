@@ -3,6 +3,10 @@
 set -eu
 # 原样记住调用参数：auto_restart 时用 exec 重新执行自己，要能把参数带过去
 ORIG_ARGS="$*"
+# 自己是谁（绝对路径）。auto_restart 用 exec 重跑时必须用绝对路径：
+#   `exec "$0"` 在 $0 是裸文件名（如 `sh start.sh` 时的 `start.sh`）时，
+#   exec 会去 PATH 里找而不是当前目录，直接 rc=127 失败（实测踩过）。
+SELF="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 ROOT=/code/fly_LicheeRV
 CONFIG=${FLY_CONFIG_FILE:-$ROOT/config.yaml}
 # Auto-boot mode: use a dedicated always-on config, do not disturb the
@@ -110,6 +114,9 @@ AUTO_RESTART=false
 AUTO_RESTART_MAX=0        # 最多跑到第几轮：0 = 不限，1 = 只跑一轮（等于不重启）
 AUTO_RESTART_DELAY_S=3    # 相机退出后等几秒再拉起
 AUTO_RESTART_COOL_MILLIC=70000   # 重启前若温度高于此值，先等它降下来
+AUTO_RESTART_MIN_RUN_S=20         # 一轮运行短于此值算「快速失败」
+AUTO_RESTART_MAX_SHORT=3          # 连续快速失败超过此次数就放弃重启（防死循环）
+AUTO_RESTART_WAIT_SESSION_S=60    # 重启前最多等会话收尾多少秒（避免切断飞行）
 # ---- 诊断：分类打印开关（默认全开，等于与改动前一样）+ 运行状态历史目录 ----
 STATE_DIR=
 PRINT_ENABLE=true
@@ -203,6 +210,9 @@ while IFS= read -r line || [ -n "$line" ]; do
         auto_restart_max) AUTO_RESTART_MAX=$value;;
         auto_restart_delay_s) AUTO_RESTART_DELAY_S=$value;;
         auto_restart_cool_millic) AUTO_RESTART_COOL_MILLIC=$value;;
+        auto_restart_min_run_s) AUTO_RESTART_MIN_RUN_S=$value;;
+        auto_restart_max_short) AUTO_RESTART_MAX_SHORT=$value;;
+        auto_restart_wait_session_s) AUTO_RESTART_WAIT_SESSION_S=$value;;
         state_dir) STATE_DIR=$value;;
         print_enable) PRINT_ENABLE=$value;;
         print_boot) PRINT_BOOT=$value;;
@@ -276,6 +286,9 @@ case "$AUTO_RESTART" in true|false) ;; *) config_error 'auto_restart must be tru
 validate_integer auto_restart_max "$AUTO_RESTART_MAX" 0 1000
 validate_integer auto_restart_delay_s "$AUTO_RESTART_DELAY_S" 0 60
 validate_integer auto_restart_cool_millic "$AUTO_RESTART_COOL_MILLIC" 0 90000
+validate_integer auto_restart_min_run_s "$AUTO_RESTART_MIN_RUN_S" 0 600
+validate_integer auto_restart_max_short "$AUTO_RESTART_MAX_SHORT" 0 100
+validate_integer auto_restart_wait_session_s "$AUTO_RESTART_WAIT_SESSION_S" 0 600
 # trigger 模式靠电控 STATE 边沿触发；没有串口就永远不会有边沿，直接拒绝而不是静默空记
 [ "$LOG_ENABLE" = "true" ] && [ "$LOG_MODE" = "trigger" ] && [ "$UART_ENABLE" != "true" ] && \
     config_error 'log_mode=trigger requires uart_enable=true (use log_mode=continuous otherwise)'
@@ -622,37 +635,123 @@ note ready "web=$([ "$HTTP_ENABLE" = "true" ] && [ "$DISPLAY_ENABLE" = "true" ] 
 # 用 exec 而不是 fork：进程号不变、不会累积，每一轮都是全新初始化的相机。
 # 代价是一段"盲区"（重启 + 相机初始化约 2~4 秒），装填飞镖远不止这么久，可以接受。
 #
-# 只有 landed_exit 会重启。崩溃/过热/MIPI 异常一律不自动重启 —— 那些是真问题，
-# 自动重启只会把故障藏起来。
-restart_after_land() {
+# 触发 auto_restart 的退出原因（其余一律不重启）
+restart_wanted() {
+    case "${1:-}" in
+        landed_exit|test_completed|run_ended|temp_limit|camera_crash) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 有没有「还没收尾的会话」：靠日志里 OPEN/CLOSE 计数判断，不需要改相机
+session_open_now() {
+    [ -r "$LOG" ] || return 1
+    _o=$(grep -c 'LOG_SESSION_OPEN' "$LOG" 2>/dev/null || true)
+    _c=$(grep -c 'LOG_SESSION_CLOSE' "$LOG" 2>/dev/null || true)
+    [ "${_o:-0}" -gt "${_c:-0}" ]
+}
+
+# 优雅停相机：SIGTERM 让它把 AVI 索引和 meta 收尾，等不到才 KILL。
+# ⚠ 程序正常结束（run_seconds 到点）时相机是「留着让 guard 20 秒后杀」的，
+#   auto_restart 若直接 exec，旧相机会和新相机抢 VI/ISP，新的一定起不来。
+stop_camera_gracefully() {
+    [ -n "${CAM_PID:-}" ] || return 0
+    cam_alive "$CAM_PID" || return 0
+    kill -TERM "$CAM_PID" 2>/dev/null || true
+    _n=0
+    while cam_alive "$CAM_PID" && [ "$_n" -lt 20 ]; do
+        sleep 1
+        _n=$((_n + 1))
+    done
+    if cam_alive "$CAM_PID"; then
+        echo "AUTO_RESTART_KILL 相机 ${_n}s 未退出，强制结束"
+        kill -KILL "$CAM_PID" 2>/dev/null || true
+        sleep 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# 自动重启：程序因「可恢复原因」结束后，把自己重新拉起来
+# ---------------------------------------------------------------------------
+# auto_restart=true 覆盖：landed_exit / test_completed / run_ended / temp_limit / camera_crash
+# 不重启：terminated、interrupted、hangup（用户主动 stop）、clock_changed、mipi_changed
+#        —— 那些是真问题，自动重启只会把故障藏起来。
+# 用 exec 而不是 fork：进程号不变、不累积，每一轮都是全新初始化的相机。
+maybe_restart() {
     if [ "$AUTO_RESTART" != true ]; then
         echo "AUTO_RESTART_DISABLED (auto_restart=false，按配置结束)"
         return 0
     fi
+    if ! restart_wanted "${EXIT_REASON:-normal}"; then
+        echo "AUTO_RESTART_SKIP reason=${EXIT_REASON:-normal}（这类退出不自动重启）"
+        return 0
+    fi
+
     ROUND=$(( ${AUTO_RESTART_ROUND:-1} + 1 ))
     if [ "$AUTO_RESTART_MAX" -gt 0 ] && [ "$ROUND" -gt "$AUTO_RESTART_MAX" ]; then
         echo "AUTO_RESTART_STOP round=$ROUND max=$AUTO_RESTART_MAX (已达上限)"
         note supervisor_exit "reason=auto_restart_limit round=$ROUND"
         return 0
     fi
-    # 重启前先等温度降下来：刚落地的板子往往最热，热着再拉起来很快会撞 74.5°C
-    T=$(cat /sys/class/thermal/thermal_zone0/temp)
+
+    # 连续快速失败守卫：崩溃后无脑重启会形成死循环，把故障藏起来
+    _now=$(date +%s)
+    RAN=$(( _now - ${START:-$_now} ))
+    SHORT_FILE="${STATE_DIR:-/tmp}/restart_short"
+    SHORT=0
+    if [ -r "$SHORT_FILE" ]; then
+        SHORT=$(cat "$SHORT_FILE" 2>/dev/null || true)
+        case "$SHORT" in ''|*[!0-9]*) SHORT=0 ;; esac
+    fi
+    if [ "$RAN" -lt "$AUTO_RESTART_MIN_RUN_S" ]; then
+        SHORT=$((SHORT + 1))
+    else
+        SHORT=0
+    fi
+    if [ -n "${STATE_DIR:-}" ]; then
+        printf '%s\n' "$SHORT" >"$SHORT_FILE" 2>/dev/null || true
+    fi
+    if [ "$SHORT" -gt "$AUTO_RESTART_MAX_SHORT" ]; then
+        echo "AUTO_RESTART_GIVEUP 连续 $SHORT 次运行不足 ${AUTO_RESTART_MIN_RUN_S}s，停止重启"
+        note supervisor_exit "reason=auto_restart_giveup short=$SHORT"
+        return 0
+    fi
+
+    # 会话还没收尾就先等它落地：否则 run_seconds 到点会把一次飞行从中间切断
+    if session_open_now; then
+        echo "AUTO_RESTART_WAIT_SESSION 等会话收尾（最多 ${AUTO_RESTART_WAIT_SESSION_S}s）"
+        _w=0
+        while session_open_now && [ "$_w" -lt "$AUTO_RESTART_WAIT_SESSION_S" ]; do
+            sleep 1
+            _w=$((_w + 1))
+        done
+        echo "AUTO_RESTART_SESSION_WAITED ${_w}s"
+    fi
+
+    stop_camera_gracefully
+
+    # 重启前先等温度降下来：刚落地的板子最热，热着拉起来很快又撞 74.5°C
+    T=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
     if [ "$T" -ge "$AUTO_RESTART_COOL_MILLIC" ]; then
         echo "AUTO_RESTART_COOLDOWN temp_millic=$T 等降到 $AUTO_RESTART_COOL_MILLIC 以下"
-        n=0
-        while [ "$T" -ge "$AUTO_RESTART_COOL_MILLIC" ] && [ "$n" -lt 150 ]; do
+        _n=0
+        while [ "$T" -ge "$AUTO_RESTART_COOL_MILLIC" ] && [ "$_n" -lt 150 ]; do
             sleep 2
-            n=$((n + 1))
-            T=$(cat /sys/class/thermal/thermal_zone0/temp)
+            _n=$((_n + 1))
+            T=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo 0)
         done
-        echo "AUTO_RESTART_COOLDOWN_DONE temp_millic=$T waited=$((n * 2))s"
+        echo "AUTO_RESTART_COOLDOWN_DONE temp_millic=$T waited=$((_n * 2))s"
     fi
-    echo "AUTO_RESTART round=$ROUND delay=${AUTO_RESTART_DELAY_S}s (落地已归档，重新拉起相机待命)"
-    note supervisor_exit "reason=auto_restart round=$ROUND"
+
+    echo "AUTO_RESTART round=$ROUND reason=${EXIT_REASON:-normal} ran=${RAN}s delay=${AUTO_RESTART_DELAY_S}s"
+    note supervisor_exit "reason=auto_restart round=$ROUND why=${EXIT_REASON:-normal} ran=$RAN"
     # 先把锁交出去，避免上一轮的 guard 子进程在新一轮启动后误清理
     rm -f "$LOCK/supervisor.pid" "$LOCK/camera.pid"
     sleep "$AUTO_RESTART_DELAY_S"
-    AUTO_RESTART_ROUND=$ROUND exec "$0" $ORIG_ARGS
+    # 用 sh 启动自己而不是直接 exec 脚本：板上的 start.sh 是 0600（无 +x），
+    # 直接 exec 会 Permission denied。
+    AUTO_RESTART_ROUND=$ROUND exec sh "$SELF" $ORIG_ARGS
 }
 
 START=$(date +%s)
@@ -667,12 +766,12 @@ while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; d
             EXIT_REASON=landed_exit
             echo "CAMERA_EXIT_AFTER_LAND (会话已归档)"
             note supervisor_exit "reason=landed_exit rc=0"
-            restart_after_land
+            maybe_restart
             exit 0
         fi
-        EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; exit 6; }
+        EXIT_REASON=camera_crash; echo CAMERA_CRASH; tail -20 "$LOG"; maybe_restart; exit 6; }
     TEMP=$(cat /sys/class/thermal/thermal_zone0/temp)
-    [ "$TEMP" -lt 74500 ] || { EXIT_REASON=temp_limit; note temp_limit "temp_millic=$TEMP limit_millic=74500"; echo "TEMP_LIMIT=$TEMP"; exit 7; }
+    [ "$TEMP" -lt 74500 ] || { EXIT_REASON=temp_limit; note temp_limit "temp_millic=$TEMP limit_millic=74500"; echo "TEMP_LIMIT=$TEMP"; maybe_restart; exit 7; }
     [ "$(clock)" = "$TARGET" ] || { EXIT_REASON=clock_changed; echo CLOCK_CHANGED; exit 8; }
     ERROR_NOW=$(awk '/^[ ]*0[ ]+[0-9]+[ ]+[0-9]+[ ]+[0-9]+/{print $2,$3,$4,$5,$6;exit}' /proc/mipi-rx)
     [ "$ERROR_NOW" = "$ERROR_BEFORE" ] || { EXIT_REASON=mipi_changed; echo "MIPI_CHANGED before=$ERROR_BEFORE after=$ERROR_NOW"; exit 9; }
@@ -683,3 +782,4 @@ while [ "$DURATION" -eq 0 ] || [ $(( $(date +%s) - START )) -lt "$DURATION" ]; d
     fi
 done
 if [ "$DURATION" -eq 0 ]; then EXIT_REASON=run_ended; echo RUN_ENDED_UNEXPECTEDLY; else EXIT_REASON=test_completed; echo TEST_COMPLETED; fi
+maybe_restart
