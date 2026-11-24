@@ -26,7 +26,7 @@ black_level_b: 256
 jpeg_quality: 85
 
 # Default run length in seconds, valid range: 20..300.
-run_seconds: 120
+run_seconds: 0
 
 # Recording switch: true = every start records an MJPEG/AVI into recordings/
 # (no --recoding argument needed); false = preview only.
@@ -185,17 +185,18 @@ log_mcu_stream: false
 # 一次飞行（会话）归档完就退出进程，不常驻待命。
 # true = 落地 + postroll 后程序自己结束（省电降温，适合赛场单次发射）
 # false = 常驻待命，等下一次起飞（适合反复调试）
-exit_after_land: false
+exit_after_land: true
 # 程序结束后自动重启（不断电连续使用）。覆盖这些退出原因：
 #   落地归档完 / run_seconds 到点 / 过热停机 / 相机崩溃
 # 不重启：手动 stop、时钟被改、MIPI 异常（那些是真问题，重启会把故障藏起来）。
 # 每轮重启前会先等会话收尾、停掉相机、温度过高则先降温。
 # 落地 → 归档 → 相机退出（释放 VI/ISP，开始降温）→ 等几秒 → 重新拉起待命。
 # 只有「落地收工」会重启；崩溃/过热/MIPI 异常一律不自动重启。
-auto_restart: false
+auto_restart: true
 auto_restart_max: 0          # 最多跑到第几轮，0 = 不限；1 = 只跑一轮（等于不重启）
 auto_restart_delay_s: 3      # 相机退出后等几秒再拉起
 auto_restart_cool_millic: 70000   # 重启前若温度高于 70°C，先等它降下来
+auto_restart_on_timeout: false    # 超时退出是否也重启（默认否：只在落地后重启）
 auto_restart_min_run_s: 20        # 一轮运行短于此值算「快速失败」
 auto_restart_max_short: 3         # 连续快速失败超过此次数就放弃重启（防崩溃死循环）
 auto_restart_wait_session_s: 60   # 重启前最多等会话收尾多少秒（避免把飞行从中间切断）

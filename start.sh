@@ -114,6 +114,9 @@ AUTO_RESTART=false
 AUTO_RESTART_MAX=0        # 最多跑到第几轮：0 = 不限，1 = 只跑一轮（等于不重启）
 AUTO_RESTART_DELAY_S=3    # 相机退出后等几秒再拉起
 AUTO_RESTART_COOL_MILLIC=70000   # 重启前若温度高于此值，先等它降下来
+# 超时（run_seconds 到点）要不要重启。默认 false：
+# 用户要的是「落地才重启」，不是「每 N 秒空转重启一轮」。
+AUTO_RESTART_ON_TIMEOUT=false
 AUTO_RESTART_MIN_RUN_S=20         # 一轮运行短于此值算「快速失败」
 AUTO_RESTART_MAX_SHORT=3          # 连续快速失败超过此次数就放弃重启（防死循环）
 AUTO_RESTART_WAIT_SESSION_S=60    # 重启前最多等会话收尾多少秒（避免切断飞行）
@@ -210,6 +213,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         auto_restart_max) AUTO_RESTART_MAX=$value;;
         auto_restart_delay_s) AUTO_RESTART_DELAY_S=$value;;
         auto_restart_cool_millic) AUTO_RESTART_COOL_MILLIC=$value;;
+        auto_restart_on_timeout) AUTO_RESTART_ON_TIMEOUT=$value;;
         auto_restart_min_run_s) AUTO_RESTART_MIN_RUN_S=$value;;
         auto_restart_max_short) AUTO_RESTART_MAX_SHORT=$value;;
         auto_restart_wait_session_s) AUTO_RESTART_WAIT_SESSION_S=$value;;
@@ -286,6 +290,7 @@ case "$AUTO_RESTART" in true|false) ;; *) config_error 'auto_restart must be tru
 validate_integer auto_restart_max "$AUTO_RESTART_MAX" 0 1000
 validate_integer auto_restart_delay_s "$AUTO_RESTART_DELAY_S" 0 60
 validate_integer auto_restart_cool_millic "$AUTO_RESTART_COOL_MILLIC" 0 90000
+case "$AUTO_RESTART_ON_TIMEOUT" in true|false) ;; *) config_error 'auto_restart_on_timeout must be true or false';; esac
 validate_integer auto_restart_min_run_s "$AUTO_RESTART_MIN_RUN_S" 0 600
 validate_integer auto_restart_max_short "$AUTO_RESTART_MAX_SHORT" 0 100
 validate_integer auto_restart_wait_session_s "$AUTO_RESTART_WAIT_SESSION_S" 0 600
@@ -638,7 +643,16 @@ note ready "web=$([ "$HTTP_ENABLE" = "true" ] && [ "$DISPLAY_ENABLE" = "true" ] 
 # 触发 auto_restart 的退出原因（其余一律不重启）
 restart_wanted() {
     case "${1:-}" in
-        landed_exit|test_completed|run_ended|temp_limit|camera_crash) return 0 ;;
+        landed_exit)
+            # 方案 A 的核心：落地归档完才重启，这是用户要的语义
+            return 0 ;;
+        temp_limit|camera_crash)
+            # 过热/崩溃属可恢复，重启比停着强
+            return 0 ;;
+        test_completed|run_ended)
+            # 超时退出默认不重启：否则不飞的时候也会每 run_seconds 空转重启一轮
+            [ "$AUTO_RESTART_ON_TIMEOUT" = true ] && return 0
+            return 1 ;;
         *) return 1 ;;
     esac
 }
