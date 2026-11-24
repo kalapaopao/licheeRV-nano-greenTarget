@@ -370,7 +370,12 @@ static void encoder_worker(){
                         // 这样视频也和 frames.csv 一样带 preroll，起飞瞬间不会缺头。
                         if(flush_preroll && avi.is_open()){
                             const size_t n=preroll_ring.size();
+                            // 打点耗时：这段同步写入会独占编码线程，期间实时帧被覆盖丢弃。
+                            // 长短取决于要写的字节数和当时页缓存压力（实测 0.19s ~ 2.55s）。
+                            const gt::MonoUs fl_t0=gt::monotonic_us();
+                            size_t fl_bytes=0;
                             for(auto& pf:preroll_ring){
+                                fl_bytes+=pf.jpg.size();
                                 if(!avi.write(recording_dir,pf.jpg.data(),pf.jpg.size(),pf.pts)){
                                     recording_failed=1; running=0; break;
                                 }
@@ -378,7 +383,8 @@ static void encoder_worker(){
                             }
                             preroll_ring.clear();
                             preroll_bytes=0;
-                            DIAGF(gt::kDiagLog,"VIDEO_PREROLL flushed=%zu 帧\n",n);
+                            DIAGF(gt::kDiagLog,"VIDEO_PREROLL flushed=%zu 帧 %.2fMB 耗时=%.0fms\n",
+                                  n,fl_bytes/1048576.0,(gt::monotonic_us()-fl_t0)/1000.0);
                         }
                         if(avi.is_open()){
                             if(!avi.write(recording_dir,jpg.data(),jpg.size(),frame.stVFrame.u64PTS)){
@@ -584,7 +590,11 @@ int main(int argc,char** argv){
     //    视觉侧没有 IMU，所以 trigger 模式必须打开 uart_enable（只收不发也行）。
     // ======================================================================
     bool log_on=false, log_trigger=true, uart_tx=true, log_mcu_stream=false;
-    unsigned log_preroll=3000, log_postroll=2000, log_maxsec=30;
+    // log_video_preroll 与 log_preroll 分开：数据预录（回滚 CSV 行）几乎不花时间，
+    // 但视频预录要在触发瞬间把几十 MB 的 JPEG 一次性写进 SD 卡，
+    // 会独占编码线程数秒、把起飞后的实时帧全部覆盖丢弃（实测 1.15~2.55s 空档）。
+    // 所以视频预录默认关闭（0），要它的人显式打开。
+    unsigned log_preroll=3000, log_video_preroll=0, log_postroll=2000, log_maxsec=30;
     const char* log_dir=getenv("LOG_DIR"); if(!log_dir||!*log_dir)log_dir="logs";
     const char* log_mode=getenv("LOG_MODE"); if(!log_mode||!*log_mode)log_mode="trigger";
     if(strcmp(log_mode,"trigger") && strcmp(log_mode,"continuous")){
@@ -596,6 +606,7 @@ int main(int argc,char** argv){
        !env_flag("UART_TX_ENABLE",true,uart_tx) ||
        !env_flag("LOG_MCU_STREAM",false,log_mcu_stream) ||
        !env_u32("LOG_PREROLL_MS",3000,0,10000,log_preroll) ||
+       !env_u32("VIDEO_PREROLL_MS",0,0,10000,log_video_preroll) ||
        !env_u32("LOG_POSTROLL_MS",2000,0,10000,log_postroll) ||
        !env_u32("LOG_MAX_SECONDS",30,1,300,log_maxsec)){
         fprintf(stderr,"Invalid log parameter in environment (check config.yaml)\n");
@@ -662,7 +673,9 @@ int main(int argc,char** argv){
         lc.mcu_stream=log_mcu_stream;   // 默认 false：frames.csv 单文件即成品表
         lc.dir=log_dir;
         lc.preroll_ms=static_cast<int>(log_preroll);
-        g_video_preroll_ms=log_preroll;   // 视频预录窗口跟数据预录保持一致
+        // 视频预录独立配置。0 = 不缓冲视频帧，触发时无需 flush，
+        // 编码线程不会阻塞 → 起飞后一帧不丢（代价：视频从触发那一刻开始）。
+        g_video_preroll_ms=log_video_preroll;
         lc.postroll_ms=static_cast<int>(log_postroll);
         lc.max_seconds=static_cast<int>(log_maxsec);
         char mbuf[512];
@@ -672,6 +685,9 @@ int main(int argc,char** argv){
                  "cfg uart_dev=%s fmt=%s rate=%uHz tx=%d track=%d detect=%d stride=%d steps=%d record=%d osd=%d",
                  uart_dev,uart_format,uart_rate,(int)uart_tx,(int)track_on,(int)g_detect_on,
                  g_detect_stride,g_sample_steps,(int)recording_enabled,(int)g_osd_on);
+        g_log.add_meta(mbuf);
+        snprintf(mbuf,sizeof(mbuf),"cfg preroll_ms=%u video_preroll_ms=%u postroll_ms=%u max_seconds=%u",
+                 log_preroll,log_video_preroll,log_postroll,log_maxsec);
         g_log.add_meta(mbuf);
         if(!g_log.start(lc)){
             fprintf(stderr,"LOG start failed: %s\n",g_log.last_error().c_str());

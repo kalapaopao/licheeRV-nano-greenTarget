@@ -96,6 +96,10 @@ LOG_ENABLE=false
 LOG_MODE=trigger
 LOG_DIR=
 LOG_PREROLL_MS=3000
+# 视频预录（毫秒）。0 = 不缓冲视频帧：触发时无需一次性写几十 MB,
+# 编码线程不阻塞，起飞后一帧不丢。代价是视频从触发那一刻开始。
+# 设成 >0 会带回「起飞后视频空档」问题（实测 1.1~2.5 秒），除非改成异步写盘。
+VIDEO_PREROLL_MS=0
 LOG_POSTROLL_MS=2000
 LOG_MAX_SECONDS=30
 LOG_MCU_STREAM=false
@@ -190,6 +194,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         log_mode) LOG_MODE=$value;;
         log_dir) LOG_DIR=$value;;
         log_preroll_ms) LOG_PREROLL_MS=$value;;
+        video_preroll_ms) VIDEO_PREROLL_MS=$value;;
         log_postroll_ms) LOG_POSTROLL_MS=$value;;
         log_max_seconds) LOG_MAX_SECONDS=$value;;
         log_mcu_stream) LOG_MCU_STREAM=$value;;
@@ -262,6 +267,7 @@ case "$UART_TX_ENABLE" in true|false) ;; *) config_error 'uart_tx_enable must be
 case "$LOG_ENABLE" in true|false) ;; *) config_error 'log_enable must be true or false';; esac
 case "$LOG_MODE" in trigger|continuous) ;; *) config_error 'log_mode must be trigger or continuous';; esac
 validate_integer log_preroll_ms "$LOG_PREROLL_MS" 0 10000
+validate_integer video_preroll_ms "$VIDEO_PREROLL_MS" 0 10000
 validate_integer log_postroll_ms "$LOG_POSTROLL_MS" 0 10000
 validate_integer log_max_seconds "$LOG_MAX_SECONDS" 1 300
 case "$LOG_MCU_STREAM" in true|false) ;; *) config_error 'log_mcu_stream must be true or false';; esac
@@ -303,7 +309,7 @@ DURATION=${1:-$RUN_SECONDS}
 if [ "$DURATION" = '--check-config' ]; then
     echo "CONFIG_OK path=$CONFIG exposure_mode=$EXPOSURE_MODE manual_exp_us=$MANUAL_EXP_US gains=$MANUAL_AGAIN,$MANUAL_DGAIN,$MANUAL_ISPGAIN auto_limits=$AUTO_EXP_MAX_US,$AUTO_AGAIN_MAX,$AUTO_DGAIN_MAX,$AUTO_ISPGAIN_MAX blc=$BLC_MODE:$BLC_R,$BLC_GR,$BLC_GB,$BLC_B jpeg=$JPEG_QUALITY run_seconds=$RUN_SECONDS record_enable=$RECORD_ENABLE display_enable=$DISPLAY_ENABLE"
 echo "CONFIG_TRACK track=$TRACK_ENABLE calib=$CAM_FX,$CAM_FY,$CAM_CX,$CAM_CY optical=$OPTICAL_YAW_DEG,$OPTICAL_PITCH_DEG invert=$CAM_INVERT_YAW,$CAM_INVERT_PITCH dia=$TARGET_DIAMETER_M aimup=$TARGET_UP_OFFSET_FACTOR sel=w$SEL_CONF_WEIGHT,a$SEL_MAX_ASPECT,c$SEL_CONFIRM_FRAMES,l$SEL_LOST_FRAMES,n$SEL_MAX_CANDIDATES kf=q$KF_PROCESS_NOISE,r$KF_MEASURE_NOISE uart=$UART_ENABLE,$UART_DEVICE@$UART_BAUD,$UART_RATE_HZ,fmt=$UART_FORMAT,rx=$UART_RX_PRINT@$UART_RX_PRINT_HZ,tx=$UART_TX_ENABLE osd=$OSD_ENABLE@x$OSD_SCALE"
-echo "CONFIG_LOG enable=$LOG_ENABLE mode=$LOG_MODE dir=${LOG_DIR:-<root>/logs} preroll=$LOG_PREROLL_MS postroll=$LOG_POSTROLL_MS max=$LOG_MAX_SECONDS"
+echo "CONFIG_LOG enable=$LOG_ENABLE mode=$LOG_MODE dir=${LOG_DIR:-<root>/logs} preroll=$LOG_PREROLL_MS video_preroll=$VIDEO_PREROLL_MS postroll=$LOG_POSTROLL_MS max=$LOG_MAX_SECONDS"
 echo "CONFIG_DIAG state_dir=${STATE_DIR:-<root>/state} print=$PRINT_ENABLE boot=$PRINT_BOOT isp=$PRINT_ISP target=$PRINT_TARGET perf=$PRINT_PERF uart=$PRINT_UART mcu=$PRINT_MCU log=$PRINT_LOG avi=$PRINT_AVI"
     exit 0
 fi
@@ -452,6 +458,7 @@ export LOG_ENABLE="$LOG_ENABLE"
 export LOG_MODE="$LOG_MODE"
 export LOG_DIR="$LOG_DIR"
 export LOG_PREROLL_MS="$LOG_PREROLL_MS"
+export VIDEO_PREROLL_MS="$VIDEO_PREROLL_MS"
 export LOG_POSTROLL_MS="$LOG_POSTROLL_MS"
 export LOG_MAX_SECONDS="$LOG_MAX_SECONDS"
 export LOG_MCU_STREAM="$LOG_MCU_STREAM"
